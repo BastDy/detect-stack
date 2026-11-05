@@ -22,7 +22,7 @@ MAX_BYTES = 3_000_000
 FIELDS = ["domaine", "linkedin", "autres_liens", "pages_analysees", "erreur"]
 
 LINKEDIN_RE = re.compile(
-    r"https?:(?:\\?/){2}(?:[a-z]{2,3}\.|www\.)?linkedin\.com(?:\\?/)(company|school|showcase|in)(?:\\?/)([^\s\"'<>?#\\&)]+)",
+    r"https?:(?:\\?/){2}(?:[a-z]{2,3}\.|www\.)?linkedin\.com(?:\\?/)(company|school|showcase|in)(?:\\?/)([A-Za-z0-9%_.-]+)",
     re.I,
 )
 # Liens de partage / widgets, sans rapport avec la page de l'entreprise.
