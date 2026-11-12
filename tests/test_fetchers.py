@@ -101,7 +101,21 @@ class TestFetchJobs(unittest.TestCase):
         }
         with patch("score_prospects.fetch_text", side_effect=texts_fetcher(texts)):
             out = sp.fetch_jobs(rec, {}, 5)
-        self.assertEqual(out, {"ats": "", "titles": []})
+        # « Aucun board » : board vide et ok=True (recherche aboutie, rien trouvé) — distinct d'un board en échec.
+        self.assertEqual(out, {"ats": "", "titles": [], "board": "", "ok": True})
+
+    def test_linked_board_with_failing_api_is_not_ok(self):
+        rec = {k: "" for k in sp.COLUMNS} | {"company": "Acme", "website": "acme.com", "domain": "acme.com"}
+        with patch("score_prospects.fetch_text", side_effect=texts_fetcher({})):
+            out = sp.fetch_jobs(rec, {"ats": "greenhouse:acme"}, 5)
+        self.assertEqual(out, {"ats": "", "titles": [], "board": "greenhouse:acme", "ok": False})
+
+    def test_linked_empty_board_is_ok(self):
+        rec = {k: "" for k in sp.COLUMNS} | {"company": "Acme", "website": "acme.com", "domain": "acme.com"}
+        texts = {"https://boards-api.greenhouse.io/v1/boards/acme/jobs": json.dumps({"jobs": []})}
+        with patch("score_prospects.fetch_text", side_effect=texts_fetcher(texts)):
+            out = sp.fetch_jobs(rec, {"ats": "greenhouse:acme"}, 5)
+        self.assertEqual((out["board"], out["ok"], out["postings"]), ("greenhouse:acme", True, []))
 
     def test_guessed_board_verified_by_domain_in_postings(self):
         rec = rec_bolster()

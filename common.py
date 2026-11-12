@@ -50,6 +50,38 @@ PROVINCE_CODES = {
 }
 
 
+# Catégories d'intitulés de poste : source unique pour le score (score_prospects) et l'historique (db).
+REVOPS_TITLE = re.compile(
+    r"revenue operations|\brevops\b|sales operations|\bsales ops\b|marketing operations|\bmarketing ops\b"
+    r"|gtm operations|go-to-market operations|customer success operations|crm (?:admin|administrator|manager|specialist)|hubspot|salesforce admin",
+    re.I,
+)
+SALES_TITLE = re.compile(
+    r"account executive|\bsales\b|business development|\b[bs]dr\b|account manager|marketing|growth|demand gen|customer success",
+    re.I,
+)
+LEADERSHIP_TITLE = re.compile(
+    r"\b(?:vp|vice[- ]president)\b.*\b(?:sales|revenue|marketing|growth|customer success)\b"
+    r"|\bcro\b|\bcmo\b"
+    r"|chief (?:revenue|commercial|marketing|growth|customer) officer"
+    r"|head of (?:sales|revenue|marketing|growth|gtm|go-to-market|customer success)"
+    r"|director,? (?:of )?(?:sales|revenue|marketing|growth|demand gen\w*|customer success)",
+    re.I,
+)
+
+
+def job_category(title):
+    """'revops' | 'leadership' | 'sales' | 'other' (priorité dans cet ordre)."""
+    title = title or ""
+    if REVOPS_TITLE.search(title):
+        return "revops"
+    if LEADERSHIP_TITLE.search(title):
+        return "leadership"
+    if SALES_TITLE.search(title):
+        return "sales"
+    return "other"
+
+
 def load_config():
     if not CONFIG.exists():
         return {}
@@ -150,6 +182,11 @@ class Cache:
             out.write(json.dumps(entry, ensure_ascii=False) + "\n")
             out.flush()
 
+    def writer(self):
+        """Fichier ouvert en ajout, passé à put() par run_stage pour sauvegarder au fil de l'eau."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        return open(self.path, "a", encoding="utf-8")
+
     def compact(self):
         """Réécrit le fichier avec une seule entrée par domaine, sans les entrées expirées."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -185,12 +222,15 @@ def norm_company(name):
 
 
 def run_stage(label, domains, worker, cache, workers):
-    """Applique worker aux domaines absents ou expirés du cache, en parallèle, en sauvegardant au fil de l'eau."""
+    """Applique worker aux domaines absents ou expirés du cache, en parallèle, en sauvegardant au fil de l'eau.
+
+    cache : un Cache, ou tout objet exposant stale / put / writer / compact (ex. pipeline.HistoryStore).
+    put() est toujours appelé depuis le thread principal (seul worker tourne dans le pool).
+    """
     todo = cache.stale(domains)
-    print(f"{label} : {len(domains) - len(todo)} déjà en cache, {len(todo)} à traiter", flush=True)
+    print(f"{label} : {len(domains) - len(todo)} déjà à jour, {len(todo)} à traiter", flush=True)
     if todo:
-        cache.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache.path, "a", encoding="utf-8") as out, ThreadPoolExecutor(max_workers=workers) as pool:
+        with cache.writer() as out, ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(worker, d): d for d in todo}
             for done, future in enumerate(as_completed(futures), 1):
                 domain = futures[future]

@@ -16,7 +16,7 @@ import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 
-from common import DATA, is_error
+from common import DATA, is_error, job_category
 
 DB_PATH = DATA / "history.db"
 SCHEMA_VERSION = 1
@@ -34,18 +34,6 @@ DEFAULT_REFRESH = {
 }
 TIERS = {"A": 0, "B": 1, "C": 2}
 PORTAL_PREFIX = "HubSpot portal "
-
-REVOPS_TITLE = re.compile(
-    r"revenue operations|\brevops\b|sales operations|\bsales ops\b|marketing operations|\bmarketing ops\b"
-    r"|gtm operations|go-to-market operations|customer success operations|crm (?:admin|administrator|manager|specialist)"
-    r"|hubspot|salesforce admin", re.I)
-LEADERSHIP_TITLE = re.compile(
-    r"\b(?:cro|cmo|chief (?:revenue|marketing|commercial|growth|customer) officer)\b"
-    r"|\b(?:vp|svp|evp|vice[- ]president|head|director)\b.*\b(?:sales|revenue|marketing|growth|gtm|go-to-market"
-    r"|business development|customer success|partnerships|commercial)\b", re.I)
-SALES_TITLE = re.compile(
-    r"account executive|\bsales\b|business development|\b[bs]dr\b|account manager|marketing|growth|demand gen"
-    r"|customer success", re.I)
 
 SCHEMA = """
 CREATE TABLE runs (
@@ -188,16 +176,8 @@ def _event_ever(conn, domain, kind, ref):
     return conn.execute("SELECT 1 FROM events WHERE domain = ? AND type = ? AND ref = ?", (domain, kind, ref)).fetchone()
 
 
-def categorize(title):
-    """Catégorie d'un intitulé de poste : 'revops', 'leadership', 'sales' ou 'other' (RevOps prioritaire)."""
-    title = title or ""
-    if REVOPS_TITLE.search(title):
-        return "revops"
-    if LEADERSHIP_TITLE.search(title):
-        return "leadership"
-    if SALES_TITLE.search(title):
-        return "sales"
-    return "other"
+# Catégorie d'un intitulé : 'revops', 'leadership', 'sales' ou 'other'. Source unique : common.job_category.
+categorize = job_category
 
 
 def tools_of(detection):
@@ -411,6 +391,17 @@ def _record_postings(conn, domain, ats, postings, run_id, day, signals, emit):
                  (domain, ats, run_id, day, len(seen), sales_open))
 
 
+def record_jobs_lookup(conn, domain, run_id, day, ok=True):
+    """Note une recherche d'offres sans board : ok=True = aucun board trouvé, ok=False = la recherche a planté.
+
+    Seule une ligne job_reads (ats = '') est écrite, pour que due_for_jobs sache quand reprendre ; aucune offre
+    ni aucun événement. Ne pas utiliser record_postings dans ce cas : '' n'est pas un board.
+    """
+    with conn:
+        conn.execute("INSERT INTO job_reads (domain, ats, run_id, day, ok, postings, sales_open) VALUES (?, '', ?, ?, ?, ?, ?)",
+                     (domain, run_id, _day(day), int(ok), 0 if ok else None, 0 if ok else None))
+
+
 # ---------- Scores ----------
 
 def record_score(conn, domain, run_id, day, row):
@@ -490,6 +481,27 @@ def recent_events(conn, domain, since_day, limit=3):
     return [dict(r) for r in rows]
 
 
+def run_events(conn, run_id, since_day=None):
+    """Événements émis par un run (optionnellement datés de since_day ou après), avec le nom de l'entreprise."""
+    rows = conn.execute("""SELECT e.day, e.domain, c.name, e.type, e.detail FROM events e LEFT JOIN companies c USING (domain)
+                           WHERE e.run_id = ? AND e.day >= ? ORDER BY e.id""", (run_id, _day(since_day or "0000-00-00")))
+    return [dict(r) for r in rows]
+
+
+def last_job_read(conn, domain, ok_only=False):
+    """Dernier relevé d'offres du domaine (ats '' = aucun board) ; None si jamais relevé."""
+    row = conn.execute(f"""SELECT * FROM job_reads WHERE domain = ? {'AND ok = 1' if ok_only else ''}
+                           ORDER BY day DESC, id DESC LIMIT 1""", (domain,)).fetchone()
+    return dict(row) if row else None
+
+
+def open_postings(conn, domain, ats):
+    """Offres encore ouvertes d'un board, dans l'ordre où elles ont été vues pour la première fois."""
+    rows = conn.execute("""SELECT * FROM job_postings WHERE domain = ? AND ats = ? AND closed_on IS NULL
+                           ORDER BY rowid""", (domain, ats))
+    return [dict(r) for r in rows]
+
+
 # ---------- Import des anciens caches ----------
 
 def _cache_lines(path):
@@ -514,25 +526,22 @@ def _cache_lines(path):
 
 
 def import_legacy_caches(conn, cache_dir):
-    """Importe une seule fois detection.jsonl et ats.jsonl comme premières observations, sans aucun événement.
+    """Importe une seule fois detection.jsonl (stack des sites) comme premières observations, sans aucun événement.
 
-    Les offres du cache n'ont qu'un titre : le titre normalisé sert de posting_id. Renvoie les compteurs,
-    ou {"already_imported": True} si l'import a déjà été fait (marqué par un run d'options {"import": "legacy_caches"}).
+    ats.jsonl n'est volontairement PAS importé : ses offres n'ont qu'un titre, il faudrait fabriquer des posting_id
+    à partir du titre ; au premier vrai relevé (vrais IDs de l'ATS) le board ne serait plus « premier » et chaque
+    offre déclencherait un faux posting_opened puis un faux posting_closed. Les offres repartent donc du premier
+    relevé réel. Renvoie les compteurs, ou {"already_imported": True} si l'import a déjà été fait (marqué par un
+    run d'options {"import": "legacy_caches"}).
     """
     if conn.execute("SELECT 1 FROM runs WHERE json_extract(options, '$.import') = 'legacy_caches'").fetchone():
         return {"already_imported": True}
     cache_dir = Path(cache_dir)
-    scans, skip_scans = _cache_lines(cache_dir / "detection.jsonl")
-    reads, skip_reads = _cache_lines(cache_dir / "ats.jsonl")
+    scans, skipped = _cache_lines(cache_dir / "detection.jsonl")
     run_id = start_run(conn, {"import": "legacy_caches", "cache_dir": str(cache_dir)})
     with conn:
         for e in scans:
             _record_scan(conn, e["domain"], e["data"], run_id, e["fetched_at"], DEFAULT_SIGNALS, emit=False)
-        for e in reads:
-            ats = (e["data"].get("ats") or "").split(" (")[0].strip()
-            postings = [{"posting_id": re.sub(r"\s+", " ", t).strip().lower(), "title": t.strip()}
-                        for t in e["data"].get("titles") or [] if isinstance(t, str) and t.strip()]
-            _record_postings(conn, e["domain"], ats, postings, run_id, _day(e["fetched_at"]), DEFAULT_SIGNALS, emit=False)
-    stats = {"scans": len(scans), "job_reads": len(reads), "skipped_lines": skip_scans + skip_reads}
-    finish_run(conn, run_id, sites_read=len(scans), errors=stats["skipped_lines"])
+    stats = {"scans": len(scans), "skipped_lines": skipped}
+    finish_run(conn, run_id, sites_read=len(scans), errors=skipped)
     return stats

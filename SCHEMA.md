@@ -27,8 +27,8 @@ Une entreprise est identifiée partout par son **domaine** (`acme.com`, sans `ww
 | `funding_rounds` | Levées de fonds connues (`announced_on`, `amount`, `currency`, `round`, `article_url`). |
 | `site_scans` | **Chaque** lecture du site, réussie ou non. `ok` = 1 si le site a répondu. `hubspot` = verdict `Oui` / `Probable` / `Non détecté` / `Erreur`. `portal_ids`, `hubspot_signals`, `tools` (autres outils détectés), `saas_hints`, `ats_links` sont des listes JSON. `error` = message si `ok = 0`. |
 | `stack` | État **actuel consolidé** des outils de chaque site, une ligne par (domaine, outil). Les outils incluent `HubSpot` (verdict Oui/Probable), chaque outil détecté (`Pipedrive`, `Calendly`, `Google Tag Manager`…) et `HubSpot portal <id>` pour chaque portal HubSpot. `status` = `present` ou `gone` ; `gone_since` = jour où l'outil a été déclaré disparu ; `absent_count` = nombre de lectures réussies consécutives où il manquait ; `checked_on` = dernier jour où la ligne a été évaluée. |
-| `job_reads` | Chaque relevé d'un board d'offres (`ats` = `greenhouse:acme`, `lever:acme`… ; vide = aucun board trouvé). `ok` = 0 si la lecture a échoué ; `postings` = nombre d'offres lues ; `sales_open` = offres sales ouvertes après ce relevé. |
-| `job_postings` | Chaque offre d'emploi vue, une ligne par (domaine, ats, posting_id). `category` = `revops` (RevOps, Sales/Marketing Ops, CRM), `leadership` (VP / Head / Director sales-marketing-revenue, CRO, CMO), `sales` (AE, SDR, marketing, customer success) ou `other`. `published_at` = date de publication donnée par l'ATS (souvent vide) ; `first_seen` / `last_seen` = premier et dernier relevé où l'offre était présente ; `closed_on` = jour où elle a été déclarée fermée (NULL = encore ouverte). Pour les offres importées des anciens caches, `posting_id` = titre normalisé en minuscules. |
+| `job_reads` | Chaque relevé d'un board d'offres (`ats` = `greenhouse:acme`, `lever:acme`… ; vide = recherche sans board : `ok` = 1 aucun board trouvé, `ok` = 0 recherche plantée). `ok` = 0 si la lecture a échoué (ex. lien vers le board sur le site mais API en panne) ; `postings` = nombre d'offres lues ; `sales_open` = offres sales ouvertes après ce relevé. |
+| `job_postings` | Chaque offre d'emploi vue, une ligne par (domaine, ats, posting_id). `category` = `revops` (RevOps, Sales/Marketing Ops, CRM), `leadership` (VP / Head / Director sales-marketing-revenue, CRO, CMO), `sales` (AE, SDR, marketing, customer success) ou `other`. `published_at` = date de publication donnée par l'ATS (souvent vide) ; `first_seen` / `last_seen` = premier et dernier relevé où l'offre était présente ; `closed_on` = jour où elle a été déclarée fermée (NULL = encore ouverte). |
 | `scores` | Score de chaque entreprise à chaque run : `tier` (`A`, `B`, `C` ou `Exclu : …`), `score` (points, NULL si exclue), `detail` (points gagnés), `angle` (angle d'approche suggéré). |
 | `events` | Changements détectés, une ligne par événement : `day`, `domain`, `type`, `detail` (texte lisible : nom de l'outil, titre du poste, `C → A`…), `run_id`. `ref` = clé technique de dédoublonnage. |
 
@@ -66,7 +66,10 @@ Une entreprise est identifiée partout par son **domaine** (`acme.com`, sans `ww
   `first_seen` égal au premier scan du domaine veut dire « déjà là quand on a commencé à regarder », pas « installé ce
   jour-là ». Pour « a installé HubSpot », utiliser les événements `tool_added`, pas `stack.first_seen`.
 - `second_portal`, `leadership_hire` et `posting_stale` peuvent apparaître dès le premier relevé (ce sont des états).
-- L'import initial des anciens caches n'a émis **aucun** événement.
+- L'import initial des anciens caches (`detection.jsonl` seulement : la stack des sites) n'a émis **aucun** événement.
+  Les offres ne sont pas importées : elles commencent au premier relevé réel du pipeline.
+- Fréquence de relecture (`DEFAULT_REFRESH`) : dernier tier A/B chaque jour, sinon site tous les 30 jours et offres
+  tous les 7 jours ; une lecture en échec est retentée le lendemain.
 - Les seuils (2 lectures, 60 jours, +3 offres) sont dans `DEFAULT_SIGNALS` en haut de `db.py`.
 
 ## Requêtes d'exemple

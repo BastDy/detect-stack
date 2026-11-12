@@ -284,6 +284,13 @@ class TestDue(Base):
         self.assertEqual(db.due_for_jobs(self.conn, domains, day(1)), ["hot.com", "broken.com", "never.com"])
         self.assertEqual(db.due_for_jobs(self.conn, domains, day(7)), domains)
 
+    def test_jobs_lookup_without_board(self):
+        db.record_jobs_lookup(self.conn, "cold.com", self.run, day(0))            # aucun board : lu, cold = 7 j
+        db.record_jobs_lookup(self.conn, "broken.com", self.run, day(0), ok=False)  # recherche plantée : lendemain
+        self.assertEqual(db.due_for_jobs(self.conn, ["cold.com", "broken.com"], day(1)), ["broken.com"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM job_postings").fetchone()[0], 0)
+        self.assertEqual(db.last_job_read(self.conn, "cold.com")["ats"], "")
+
     def test_last_scan_and_recent_events(self):
         scan = db.last_scan(self.conn, "hot.com")
         self.assertEqual((scan["ok"], scan["tools"], scan["saas_hints"]), (1, [], ["pricing", "demo"]))
@@ -312,17 +319,20 @@ class TestLegacyImport(Base):
                 json.dumps({"domain": "none.com", "fetched_at": "2026-11-05T10:00:00", "data": {"ats": "", "titles": []}}),
             ]) + "\n", encoding="utf-8")
             stats = db.import_legacy_caches(self.conn, cache)
-            self.assertEqual(stats, {"scans": 3, "job_reads": 2, "skipped_lines": 1})
+            self.assertEqual(stats, {"scans": 3, "skipped_lines": 1})
             self.assertEqual(db.import_legacy_caches(self.conn, cache), {"already_imported": True})
         self.assertEqual(self.events(), [])
         self.assertIn("Zoho", self.stack())
-        rows = self.conn.execute("SELECT ats, posting_id, category FROM job_postings ORDER BY posting_id").fetchall()
-        self.assertEqual([tuple(r) for r in rows], [("greenhouse:acme", "revenue operations manager", "revops"),
-                                                     ("greenhouse:acme", "vp sales", "leadership")])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM site_scans").fetchone()[0], 3)
+        # ats.jsonl n'est pas importé (titres sans vrais IDs) : aucune offre, aucun relevé.
+        for table in ("job_postings", "job_reads"):
+            self.assertEqual(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0, table)
         # Après l'import, le scan suivant n'est plus un "premier scan" : les changements sont signalés.
         db.record_scan(self.conn, "acme.com", det(portals="1;2", tools="Calendly, Zoho, Drift"), self.run, "2026-11-12T09:00:00")
         self.assertEqual(self.events(), [("tool_added", "Drift")])
+        # Le premier vrai relevé d'offres reste un premier relevé : pas de rafale de posting_opened.
+        self.postings(12, [job("4001", "Revenue Operations Manager"), job("4002", "Account Executive")])
+        self.assertEqual(self.events("posting_opened"), [])
 
 
 class TestCategorize(unittest.TestCase):

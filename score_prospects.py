@@ -7,8 +7,9 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from common import (
-    CACHE, CITY_PROVINCE, HERE, OUTPUT, PROVINCE_CODES, Cache, fetch, load_config, norm_company, normalize, run_stage,
+from common import (  # noqa: F401  (LEADERSHIP_TITLE réexporté)
+    CACHE, CITY_PROVINCE, HERE, LEADERSHIP_TITLE, OUTPUT, PROVINCE_CODES, REVOPS_TITLE, SALES_TITLE, Cache, fetch,
+    job_category, load_config, norm_company, normalize, run_stage,
 )
 from detect_stack import analyze
 
@@ -30,36 +31,7 @@ COLUMNS = {
     "linkedin": ["company linkedin url", "linkedin url", "linkedin"],
 }
 SAAS_INDUSTRY = re.compile(r"software|internet|saas", re.I)
-REVOPS_TITLE = re.compile(
-    r"revenue operations|\brevops\b|sales operations|\bsales ops\b|marketing operations|\bmarketing ops\b"
-    r"|gtm operations|go-to-market operations|customer success operations|crm (?:admin|administrator|manager|specialist)|hubspot|salesforce admin",
-    re.I,
-)
-SALES_TITLE = re.compile(
-    r"account executive|\bsales\b|business development|\b[bs]dr\b|account manager|marketing|growth|demand gen|customer success",
-    re.I,
-)
 COMPETITOR_CRM = {"Salesforce Pardot", "Salesforce Web-to-Lead", "Marketo", "Pipedrive", "Zoho"}
-LEADERSHIP_TITLE = re.compile(
-    r"\b(?:vp|vice[- ]president)\b.*\b(?:sales|revenue|marketing|growth|customer success)\b"
-    r"|\bcro\b|\bcmo\b"
-    r"|chief (?:revenue|commercial|marketing|growth|customer) officer"
-    r"|head of (?:sales|revenue|marketing|growth|gtm|go-to-market|customer success)"
-    r"|director,? (?:of )?(?:sales|revenue|marketing|growth|demand gen\w*|customer success)",
-    re.I,
-)
-
-
-def job_category(title):
-    """'revops' | 'leadership' | 'sales' | 'other' (priorité dans cet ordre)."""
-    title = title or ""
-    if REVOPS_TITLE.search(title):
-        return "revops"
-    if LEADERSHIP_TITLE.search(title):
-        return "leadership"
-    if SALES_TITLE.search(title):
-        return "sales"
-    return "other"
 
 
 def _s(value):
@@ -298,7 +270,15 @@ def board_belongs_to(rec, provider, slug, raw, payload, timeout):
 
 
 def fetch_jobs(rec, detection, timeout):
+    """Offres du board ATS de l'entreprise.
+
+    Renvoie {"ats": libellé affiché, "titles", "postings", "board": "provider:slug", "ok": bool} :
+      - board lu (même vide)          -> board renseigné, ok True, postings = offres lues ;
+      - lien du site mais API en échec -> board renseigné, ok False, aucune offre (rien à conclure) ;
+      - aucun board (ni lien, ni slug deviné vérifié) -> board "", ok True.
+    """
     candidates, source = ats_candidates(rec, detection)
+    failed = ""
     for provider, slug in candidates:
         url, extract = ATS_API[provider]
         try:
@@ -307,12 +287,16 @@ def fetch_jobs(rec, detection, timeout):
             postings = _postings(extract, payload)[:300]
             titles = [p["title"] for p in postings]
         except Exception:
+            if source == "lien du site":
+                failed = failed or f"{provider}:{slug}"
             continue
+        board = f"{provider}:{slug}"
         if source == "lien du site":
-            return {"ats": f"{provider}:{slug} ({source})", "titles": titles, "postings": postings}
+            return {"ats": f"{board} ({source})", "titles": titles, "postings": postings, "board": board, "ok": True}
         if titles and board_belongs_to(rec, provider, slug, raw, payload, timeout):
-            return {"ats": f"{provider}:{slug} (slug deviné, vérifié)", "titles": titles, "postings": postings}
-    return {"ats": "", "titles": []}
+            return {"ats": f"{board} (slug deviné, vérifié)", "titles": titles, "postings": postings,
+                    "board": board, "ok": True}
+    return {"ats": "", "titles": [], "board": failed, "ok": not failed}
 
 
 def parse_int(value):
@@ -468,8 +452,14 @@ def exclusions(records, applied, grid=None):
     return candidates, excluded
 
 
-def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats_min=None, today=None, refresh=False):
-    """Pipeline de scoring : exclusions -> détection des sites -> offres d'emploi -> score. Renvoie les lignes triées."""
+def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats_min=None, today=None, refresh=False,
+                  stores=None):
+    """Pipeline de scoring : exclusions -> détection des sites -> offres d'emploi -> score. Renvoie les lignes triées.
+
+    stores : {"detection": ..., "ats": ...} pour remplacer les caches JSONL de cache_dir par un autre stockage
+    exposant la même interface que Cache (stale / get / put / writer / compact / data), ex. pipeline.HistoryStore.
+    La fraîcheur (et --refresh) est alors l'affaire du store.
+    """
     today = today or date.today()
     try:
         grid = scoring_config()
@@ -479,7 +469,8 @@ def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats
     print(f"{len(excluded)} exclues · {len(candidates)} à analyser", flush=True)
 
     cache_dir = Path(cache_dir)
-    det_cache = Cache(cache_dir / "detection.jsonl", 0 if refresh else DETECTION_MAX_AGE_DAYS)
+    stores = stores or {}
+    det_cache = stores.get("detection") or Cache(cache_dir / "detection.jsonl", 0 if refresh else DETECTION_MAX_AGE_DAYS)
     run_stage("Détection des sites", [r["domain"] for r in candidates],
               lambda d: analyze(d, timeout), det_cache, workers)
     detections = det_cache.data()
@@ -490,7 +481,7 @@ def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats
     threshold = ats_min if ats_min is not None else grid["tiers"]["B"] - pts["revops_job"] - pts["sales_jobs"]
     ats_targets = [r["domain"] for r in candidates
                    if score(r, detections.get(r["domain"], {}), {}, today, grid)["score"] >= threshold]
-    ats_cache = Cache(cache_dir / "ats.jsonl", 0 if refresh else ATS_MAX_AGE_DAYS)
+    ats_cache = stores.get("ats") or Cache(cache_dir / "ats.jsonl", 0 if refresh else ATS_MAX_AGE_DAYS)
     run_stage("Offres d'emploi (ATS)", ats_targets,
               lambda d: fetch_jobs(by_domain[d], detections.get(d, {}), timeout), ats_cache, workers)
     jobs = ats_cache.data()
