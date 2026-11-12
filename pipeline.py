@@ -10,7 +10,8 @@
   4. Détection   stack du site (HubSpot, CRM concurrents, outils), relue selon l'historique :
                  tier A/B chaque jour, sinon tous les 30 jours, site en erreur le lendemain
   5. Offres      postes ouverts via Greenhouse / Lever / Ashby / Workable (pré-filtre : seules les entreprises
-                 pouvant atteindre le tier B) : tier A/B chaque jour, sinon tous les 7 jours, échec le lendemain
+                 pouvant atteindre le tier B) : tier A/B chaque jour, sinon tous les 7 jours, échec le lendemain,
+                 aucun board trouvé : 14 jours
   6. Score       grille ICP -> tier A / B / C + angle d'approche ; score enregistré dans l'historique
   7. LinkedIn    page entreprise pour les tiers A et B : cache 90 jours
   8. Sortie      data/output/prospects-AAAA-MM-JJ.csv (colonne signaux_recents = changements des 30 derniers
@@ -35,7 +36,9 @@ import betakit_funding
 import db
 import find_linkedin
 import yc_companies
-from common import CACHE, INPUTS, OUTPUT, Cache, is_error, job_category, normalize, run_stage
+from common import (
+    CACHE, INPUTS, OUTPUT, Cache, is_error, job_category, normalize, reset_throttle_stats, run_stage, throttle_stats,
+)
 from score_prospects import (
     OUTPUT_FIELDS, TIER_ORDER, column_map, default_tracker, exclusions, load_applied, parse_date, read_export,
     score_records, scoring_config,
@@ -108,8 +111,10 @@ class HistoryStore:
             return
         board = data.get("board") or ""
         if not board:
-            # Aucun board (ok) ou fetch_jobs a planté ({"erreur": …}) : pas de record_postings, '' n'est pas un board.
-            db.record_jobs_lookup(self.conn, domain, self.run_id, self.today, ok="erreur" not in data)
+            # Aucun board (ok), recherche non concluante ("ok": False) ou fetch_jobs planté ({"erreur": …}) :
+            # pas de record_postings, '' n'est pas un board.
+            db.record_jobs_lookup(self.conn, domain, self.run_id, self.today,
+                                  ok=("erreur" not in data and data.get("ok", True)))
         elif not data.get("ok", True):
             db.record_postings(self.conn, domain, board, None, self.run_id, self.today)  # lien du site, API en échec
         else:
@@ -381,8 +386,11 @@ def write_csv(path, rows, fields):
             time.sleep(5)
 
 
-def write_summary(path, rows, sources, warnings, prev_file, elapsed, tracker_size, today=None, changes=None):
-    """changes : événements de ce run (db.run_events), pour la section « Ce qui a changé » ; None = pas d'historique."""
+def write_summary(path, rows, sources, warnings, prev_file, elapsed, tracker_size, today=None, changes=None, throttled=None):
+    """changes : événements de ce run (db.run_events), pour la section « Ce qui a changé » ; None = pas d'historique.
+
+    throttled : {hôte: réponses 429/503} (common.throttle_stats) ; None = ligne omise.
+    """
     today = today or date.today()
     tiers = {t: sum(r["tier"] == t for r in rows) for t in TIER_ORDER}
     excluded = sum(r["tier"].startswith("Exclu") for r in rows)
@@ -398,6 +406,8 @@ def write_summary(path, rows, sources, warnings, prev_file, elapsed, tracker_siz
     ]
     if changes is not None:
         lines.append(f"- Événements détectés : **{len(changes)}**")
+    if throttled is not None:
+        lines.append(f"- Requêtes ralenties (429/503) : {sum(throttled.values())}")
     lines += [
         f"- Sites injoignables : {site_errors} (réessayés au prochain run)",
         f"- Durée : {elapsed:.0f} s",
@@ -447,13 +457,15 @@ def main(argv=None):
     if not imported.get("already_imported"):
         print(f"Historique : {imported['scans']} lectures de sites importées des anciens caches", flush=True)
     run_id = db.start_run(conn, vars(args))
-    stats = {"companies": 0, "sites_read": 0, "errors": 0}
+    stats = {"companies": 0, "sites_read": 0, "errors": 0, "throttled": 0}
+    reset_throttle_stats()
     try:
         run(args, conn, run_id, grid, today, started, warnings, stats)
     except BaseException as exc:  # y compris sys.exit : le run est clos proprement, puis l'erreur remonte
         warnings.append(f"Run interrompu : {type(exc).__name__}: {exc}"[:300])
         raise
     finally:
+        stats["throttled"] = sum(throttle_stats().values())
         db.finish_run(conn, run_id, warnings=warnings, **stats)
         conn.close()
 
@@ -510,9 +522,13 @@ def run(args, conn, run_id, grid, today, started, warnings, stats):
             shutil.copyfile(dated, LATEST)
         except PermissionError:
             warnings.append(f"{LATEST.name} ouvert dans Excel : non mis à jour, le fichier daté est à jour")
+    throttled = throttle_stats()
+    if throttled:
+        detail = ", ".join(f"{h} {n}" for h, n in sorted(throttled.items(), key=lambda kv: (-kv[1], kv[0])))
+        warnings.append(f"Requêtes ralenties par les serveurs : {sum(throttled.values())} ({detail})")
     summary = OUTPUT / f"resume-{today.isoformat()}.md"
     tiers, new = write_summary(summary, rows, sources, warnings, prev_file, time.time() - started, len(applied),
-                               today=today, changes=changes)
+                               today=today, changes=changes, throttled=throttled)
 
     print(f"\n== Résultat ==\nTier A : {tiers['A']} · Tier B : {tiers['B']} · Tier C : {tiers['C']} · Nouveautés : {new}"
           f" · Événements : {len(changes)}")

@@ -4,14 +4,17 @@ Stdlib uniquement, pour que le projet tourne sans rien installer.
 """
 import csv
 import json
+import random
 import re
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -28,6 +31,13 @@ UA = (
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 MAX_BYTES = 3_000_000
+
+# Politesse envers les serveurs (le pipeline tourne avec 24 threads) : limites par hôte.
+HOST_MAX_CONCURRENT = 4    # requêtes simultanées au plus vers un même hôte
+HOST_MIN_INTERVAL = 0.25   # secondes entre deux DÉBUTS de requête vers un même hôte
+THROTTLE_RETRIES = 3       # nouvelles tentatives sur 429 / 503
+RETRY_AFTER_MAX = 30       # plafond de l'attente (Retry-After ou backoff), en secondes
+BACKOFF_BASE = 1.5         # backoff exponentiel : BACKOFF_BASE * 2**essai + gigue
 
 CITY_PROVINCE = {
     **dict.fromkeys(["toronto", "waterloo", "kitchener", "ottawa", "mississauga", "hamilton", "london", "markham",
@@ -110,20 +120,122 @@ def _transient(exc):
     return isinstance(exc, (TimeoutError, socket.timeout, ConnectionError))
 
 
+class _Host:
+    """État d'un hôte : créneaux simultanés, verrou d'espacement, début de la dernière requête."""
+
+    def __init__(self):
+        self.slots = threading.BoundedSemaphore(HOST_MAX_CONCURRENT)
+        self.lock = threading.Lock()
+        self.last_start = 0.0
+
+
+_HOSTS = {}
+_HOSTS_LOCK = threading.Lock()
+_THROTTLED = {}
+_THROTTLED_LOCK = threading.Lock()
+
+
+def _host_state(host):
+    with _HOSTS_LOCK:
+        state = _HOSTS.get(host)
+        if state is None:
+            state = _HOSTS[host] = _Host()
+        return state
+
+
+def _acquire(host):
+    """Prend un créneau sur l'hôte et espace les débuts de requête. Ne bloque que cet hôte."""
+    state = _host_state(host)
+    state.slots.acquire()
+    try:
+        with state.lock:
+            wait = state.last_start + HOST_MIN_INTERVAL - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            state.last_start = time.monotonic()
+    except BaseException:
+        state.slots.release()
+        raise
+    return state
+
+
+def throttle_stats():
+    """Copie {hôte: nombre de réponses 429/503 reçues} depuis le dernier reset."""
+    with _THROTTLED_LOCK:
+        return dict(_THROTTLED)
+
+
+def reset_throttle_stats():
+    with _THROTTLED_LOCK:
+        _THROTTLED.clear()
+
+
+def _is_throttle(exc):
+    return isinstance(exc, urllib.error.HTTPError) and exc.code in (429, 503)
+
+
+def _retry_after(exc):
+    """Délai demandé par l'en-tête Retry-After (secondes ou date HTTP), plafonné ; None si absent ou illisible."""
+    value = (exc.headers.get("Retry-After") if exc.headers else None) or ""
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        delay = float(int(value))
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            delay = (when - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            return None
+    return min(max(delay, 0.0), RETRY_AFTER_MAX)
+
+
+def _backoff(attempt):
+    return min(BACKOFF_BASE * 2 ** attempt + random.uniform(0, 0.5), RETRY_AFTER_MAX)
+
+
 def fetch(url, timeout, accept=None, max_bytes=MAX_BYTES, retries=1):
-    """GET -> (url finale, texte). Réessaie une fois sur les erreurs passagères (timeout, 429, 5xx)."""
+    """GET -> (url finale, texte), avec limite par hôte (HOST_MAX_CONCURRENT, HOST_MIN_INTERVAL).
+
+    - 429 / 503 : jusqu'à THROTTLE_RETRIES nouvelles tentatives, en attendant Retry-After (plafonné à
+      RETRY_AFTER_MAX) ou un backoff exponentiel avec gigue ; chaque réponse est comptée (throttle_stats) ;
+    - autres erreurs passagères (timeout, connexion, 5xx) : `retries` nouvelles tentatives après 1,5 s × essai ;
+    - le créneau de l'hôte est libéré avant d'attendre ; DNS introuvable, 404… ne sont pas retentés.
+    """
     headers = {"User-Agent": UA, "Accept-Language": "en"}
     if accept:
         headers["Accept"] = accept
-    for attempt in range(retries + 1):
+    host = (urlparse(url).hostname or "").lower()
+    throttled = other = 0
+    while True:
+        state = _acquire(host)
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.geturl(), resp.read(max_bytes).decode("utf-8", errors="replace")
         except Exception as exc:
-            if attempt == retries or not _transient(exc):
-                raise
-            time.sleep(1.5 * (attempt + 1))
+            error = exc
+        finally:
+            state.slots.release()
+        if _is_throttle(error):
+            with _THROTTLED_LOCK:
+                _THROTTLED[host] = _THROTTLED.get(host, 0) + 1
+            if throttled >= THROTTLE_RETRIES:
+                raise error
+            delay = _retry_after(error)
+            if delay is None:
+                delay = _backoff(throttled)
+            throttled += 1
+            error.close()
+        elif _transient(error) and other < retries:
+            delay = 1.5 * (other + 1)
+            other += 1
+        else:
+            raise error
+        time.sleep(delay)
 
 
 def fetch_home(domain, timeout):
@@ -137,7 +249,8 @@ def fetch_home(domain, timeout):
 
 
 def is_error(data):
-    return bool(data.get("erreur")) or data.get("hubspot") == "Erreur"
+    """Résultat en échec : "erreur", HubSpot « Erreur », ou "ok": False (recherche d'offres non concluante)."""
+    return bool(data.get("erreur")) or data.get("hubspot") == "Erreur" or data.get("ok") is False
 
 
 class Cache:

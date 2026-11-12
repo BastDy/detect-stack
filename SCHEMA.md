@@ -22,7 +22,7 @@ Une entreprise est identifiée partout par son **domaine** (`acme.com`, sans `ww
 
 | Table | Rôle |
 |---|---|
-| `runs` | Une ligne par exécution du pipeline. `options` (JSON) = options de la ligne de commande ; `warnings` (JSON) = liste d'avertissements. Un run d'options `{"import": "legacy_caches"}` correspond à l'import initial des anciens caches. |
+| `runs` | Une ligne par exécution du pipeline. `options` (JSON) = options de la ligne de commande ; `warnings` (JSON) = liste d'avertissements ; `throttled` = nombre de réponses 429/503 reçues pendant le run (NULL pour les anciens runs). Un run d'options `{"import": "legacy_caches"}` correspond à l'import initial des anciens caches. |
 | `companies` | Fiche de chaque entreprise (nom, taille, secteur, lieu). `province` = province canadienne ; `sources` = liste JSON des sources (`betakit`, `yc`, nom des exports) ; `excluded_reason` = raison d'exclusion (`Exclu : candidature CDI`…) ou NULL ; `first_seen` / `last_seen` = premier et dernier jour où l'entreprise était dans les sources. |
 | `funding_rounds` | Levées de fonds connues (`announced_on`, `amount`, `currency`, `round`, `article_url`). |
 | `site_scans` | **Chaque** lecture du site, réussie ou non. `ok` = 1 si le site a répondu. `hubspot` = verdict `Oui` / `Probable` / `Non détecté` / `Erreur`. `portal_ids`, `hubspot_signals`, `tools` (autres outils détectés), `saas_hints`, `ats_links` sont des listes JSON. `error` = message si `ok = 0`. |
@@ -69,7 +69,11 @@ Une entreprise est identifiée partout par son **domaine** (`acme.com`, sans `ww
 - L'import initial des anciens caches (`detection.jsonl` seulement : la stack des sites) n'a émis **aucun** événement.
   Les offres ne sont pas importées : elles commencent au premier relevé réel du pipeline.
 - Fréquence de relecture (`DEFAULT_REFRESH`) : dernier tier A/B chaque jour, sinon site tous les 30 jours et offres
-  tous les 7 jours ; une lecture en échec est retentée le lendemain.
+  tous les 7 jours ; une lecture en échec (ou une recherche d'offres non concluante : 429, 5xx, timeout) est retentée
+  le lendemain ; une recherche d'offres réussie sans aucun board trouvé n'est refaite que tous les 14 jours (`no_board`),
+  tier A/B compris.
+- Les requêtes web sont limitées par hôte (`common.py` : 4 simultanées, 0,25 s entre deux débuts) et retentées sur 429/503
+  en respectant `Retry-After`.
 - Les seuils (2 lectures, 60 jours, +3 offres) sont dans `DEFAULT_SIGNALS` en haut de `db.py`.
 
 ## Requêtes d'exemple

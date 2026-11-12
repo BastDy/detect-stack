@@ -194,9 +194,10 @@ class TestPipelineHistory(unittest.TestCase):
                          [(0, "RuntimeError: boom")])
         self.assertIn("boom", rows["coldco.ca"]["erreur_site"])
         # acme : lien du site mais API en échec -> relevé ok = 0 au nom du board, aucune offre conclue.
-        # coldco : plus de lien (site en erreur), slugs devinés introuvables -> « aucun board » (ats '', ok = 1).
+        # coldco : plus de lien (site en erreur), slugs devinés en échec « inconnu » (ATS en panne) -> recherche non
+        # concluante (ats '', ok = 0), retentée le lendemain.
         self.assertEqual(self.query("SELECT domain, ats, ok FROM job_reads ORDER BY domain"),
-                         [("acme.com", "greenhouse:acme", 0), ("coldco.ca", "", 1)])
+                         [("acme.com", "greenhouse:acme", 0), ("coldco.ca", "", 0)])
         self.assertEqual(self.query("SELECT COUNT(*) FROM job_postings"), [(0,)])
         self.assertEqual(rows["acme.com"]["ats"], "")
         self.assertEqual(self.query("SELECT errors FROM runs WHERE json_extract(options, '$.import') IS NULL"), [(1,)])

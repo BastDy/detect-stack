@@ -25,11 +25,13 @@ def pages_fetcher(pages):
 
 
 def texts_fetcher(texts):
-    """Faux fetch_text(url, timeout) : renvoie le texte JSON attendu, sinon lève URLError."""
+    """Faux fetch_text(url, timeout) : renvoie le texte JSON attendu, sinon lève HTTPError 404 (board absent)."""
     def fake(url, *args, **kwargs):
         if url in texts:
             return texts[url]
-        raise urllib.error.URLError("x")
+        err = urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        err.close()
+        raise err
     return fake
 
 

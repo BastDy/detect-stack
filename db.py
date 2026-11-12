@@ -27,10 +27,11 @@ DEFAULT_SIGNALS = {
     "stale_days": 60,    # âge d'une offre RevOps encore ouverte pour émettre posting_stale
     "spike_min": 3,      # hausse minimale du nombre d'offres sales ouvertes pour hiring_spike
 }
-# Délais de relecture, en jours. "hot" = dernier tier A ou B, "cold" = C, exclu ou inconnu.
+# Délais de relecture, en jours. "hot" = dernier tier A ou B, "cold" = C, exclu ou inconnu, "error" = après un échec.
+# "no_board" (offres) : recherche réussie sans aucun board trouvé, quel que soit le tier.
 DEFAULT_REFRESH = {
     "scan": {"hot": 1, "cold": 30, "error": 1},
-    "jobs": {"hot": 1, "cold": 7, "error": 1},
+    "jobs": {"hot": 1, "cold": 7, "error": 1, "no_board": 14},
 }
 TIERS = {"A": 0, "B": 1, "C": 2}
 PORTAL_PREFIX = "HubSpot portal "
@@ -38,7 +39,7 @@ PORTAL_PREFIX = "HubSpot portal "
 SCHEMA = """
 CREATE TABLE runs (
     id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, options TEXT,
-    companies INTEGER, sites_read INTEGER, errors INTEGER, warnings TEXT
+    companies INTEGER, sites_read INTEGER, errors INTEGER, warnings TEXT, throttled INTEGER
 );
 CREATE TABLE companies (
     domain TEXT PRIMARY KEY, name TEXT, employees INTEGER, industry TEXT, city TEXT, province TEXT, country TEXT,
@@ -128,6 +129,9 @@ def connect(path=DB_PATH):
         version = 1
     for target in range(version + 1, SCHEMA_VERSION + 1):
         conn.executescript(MIGRATIONS[target])
+    # Colonne ajoutée après la v1 : bases existantes mises à niveau sans changer user_version.
+    if "throttled" not in {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}:
+        conn.execute("ALTER TABLE runs ADD COLUMN throttled INTEGER")
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
     return conn
@@ -198,11 +202,11 @@ def start_run(conn, options):
     return cur.lastrowid
 
 
-RUN_STATS = {"finished_at", "companies", "sites_read", "errors", "warnings"}
+RUN_STATS = {"finished_at", "companies", "sites_read", "errors", "warnings", "throttled"}
 
 
 def finish_run(conn, run_id, **stats):
-    """Clôt un run. stats : companies, sites_read, errors, warnings (liste), finished_at (défaut : maintenant)."""
+    """Clôt un run. stats : companies, sites_read, errors, throttled (réponses 429/503), warnings (liste), finished_at (défaut : maintenant)."""
     unknown = set(stats) - RUN_STATS
     if unknown:
         raise ValueError(f"finish_run : statistiques inconnues {sorted(unknown)}")
@@ -444,7 +448,8 @@ def last_tier(conn, domain):
     return row["tier"] if row else None
 
 
-def _due(conn, domains, today, delays, latest_sql):
+def _due(conn, domains, today, delays, latest_sql, no_board=False):
+    """Domaines à relire. no_board : une lecture réussie sans board (ats '') attend delays['no_board'] jours, tier A/B compris."""
     today = date.fromisoformat(_day(today))
     due = []
     for domain in domains:
@@ -454,6 +459,8 @@ def _due(conn, domains, today, delays, latest_sql):
             continue
         if not last["ok"]:
             wait = delays["error"]
+        elif no_board and last["ats"] == "":
+            wait = delays.get("no_board", delays["cold"])
         else:
             wait = delays["hot"] if last_tier(conn, domain) in {"A", "B"} else delays["cold"]
         if (today - date.fromisoformat(last["day"][:10])).days >= wait:
@@ -469,10 +476,13 @@ def due_for_scan(conn, domains, today, policy=None):
 
 
 def due_for_jobs(conn, domains, today, policy=None):
-    """Domaines dont les offres sont à relire : jamais lues, échec (1 j), tier A/B (1 j), sinon 7 j."""
+    """Domaines dont les offres sont à relire : jamais lues, échec (1 j), tier A/B (1 j), sinon 7 j.
+
+    Exception : une recherche réussie qui n'a trouvé aucun board attend 14 j (no_board), même en tier A/B.
+    """
     delays = (policy or DEFAULT_REFRESH)["jobs"]
     return _due(conn, domains, today, delays,
-                "SELECT day, ok FROM job_reads WHERE domain = ? ORDER BY day DESC, id DESC LIMIT 1")
+                "SELECT day, ok, ats FROM job_reads WHERE domain = ? ORDER BY day DESC, id DESC LIMIT 1", no_board=True)
 
 
 def recent_events(conn, domain, since_day, limit=3):

@@ -3,7 +3,9 @@ import argparse
 import csv
 import json
 import re
+import socket
 import sys
+import urllib.error
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -253,7 +255,15 @@ def ats_candidates(rec, detection):
     return [(provider, g) for g in sorted(guesses) if len(g) >= 5 for provider in ATS_API], "slug deviné"
 
 
+def _unknown_error(exc):
+    """Échec qui ne dit rien sur l'existence du board : 429, 5xx, timeout, connexion. (404/410/autre 4xx = absent.)"""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 429 or exc.code >= 500
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError))
+
+
 def board_belongs_to(rec, provider, slug, raw, payload, timeout):
+    """True / False ; None si la vérification (nom du board Greenhouse) a échoué pour une raison passagère."""
     # A guessed slug like "bolster" can be another company's board: require the domain in the postings or a matching board name.
     if rec["domain"] in raw.lower():
         return True
@@ -261,8 +271,8 @@ def board_belongs_to(rec, provider, slug, raw, payload, timeout):
     if provider == "greenhouse":
         try:
             name = fetch_json(f"https://boards-api.greenhouse.io/v1/boards/{slug}", timeout).get("name", "")
-        except Exception:
-            return False
+        except Exception as exc:
+            return None if _unknown_error(exc) else False
     elif provider == "workable" and isinstance(payload, dict):
         name = payload.get("name", "")
     company, board = norm_company(rec["company"]), norm_company(name)
@@ -275,10 +285,14 @@ def fetch_jobs(rec, detection, timeout):
     Renvoie {"ats": libellé affiché, "titles", "postings", "board": "provider:slug", "ok": bool} :
       - board lu (même vide)          -> board renseigné, ok True, postings = offres lues ;
       - lien du site mais API en échec -> board renseigné, ok False, aucune offre (rien à conclure) ;
-      - aucun board (ni lien, ni slug deviné vérifié) -> board "", ok True.
+      - aucun board, et chaque slug deviné est clairement absent (404, JSON illisible, board vide ou d'une autre
+        entreprise) -> board "", ok True ;
+      - aucun board trouvé mais au moins un slug deviné en échec « inconnu » (429, 5xx, timeout, connexion,
+        vérification du nom impossible) -> board "", ok False : recherche non concluante, à retenter vite.
     """
     candidates, source = ats_candidates(rec, detection)
     failed = ""
+    unknown = False
     for provider, slug in candidates:
         url, extract = ATS_API[provider]
         try:
@@ -286,17 +300,23 @@ def fetch_jobs(rec, detection, timeout):
             payload = json.loads(raw)
             postings = _postings(extract, payload)[:300]
             titles = [p["title"] for p in postings]
-        except Exception:
+        except Exception as exc:
             if source == "lien du site":
                 failed = failed or f"{provider}:{slug}"
+            elif _unknown_error(exc):
+                unknown = True
             continue
         board = f"{provider}:{slug}"
         if source == "lien du site":
             return {"ats": f"{board} ({source})", "titles": titles, "postings": postings, "board": board, "ok": True}
-        if titles and board_belongs_to(rec, provider, slug, raw, payload, timeout):
-            return {"ats": f"{board} (slug deviné, vérifié)", "titles": titles, "postings": postings,
-                    "board": board, "ok": True}
-    return {"ats": "", "titles": [], "board": failed, "ok": not failed}
+        if titles:
+            belongs = board_belongs_to(rec, provider, slug, raw, payload, timeout)
+            if belongs:
+                return {"ats": f"{board} (slug deviné, vérifié)", "titles": titles, "postings": postings,
+                        "board": board, "ok": True}
+            if belongs is None:
+                unknown = True
+    return {"ats": "", "titles": [], "board": failed, "ok": not (failed or unknown)}
 
 
 def parse_int(value):
