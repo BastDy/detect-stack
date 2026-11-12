@@ -9,12 +9,14 @@
      -> chaque entreprise (et sa dernière levée) est enregistrée dans l'historique data/history.db
   4. Détection   stack du site (HubSpot, CRM concurrents, outils), relue selon l'historique :
                  tier A/B chaque jour, sinon tous les 30 jours, site en erreur le lendemain
-  5. Offres      postes ouverts via Greenhouse / Lever / Ashby / Workable (pré-filtre : seules les entreprises
+  5. Offres      postes ouverts via Greenhouse / Lever / Ashby (+ Workable seulement si le
+                 site y renvoie : slugs jamais devinés, hôte très limité) (pré-filtre : seules les entreprises
                  pouvant atteindre le tier B) : tier A/B chaque jour, sinon tous les 7 jours, échec le lendemain,
                  aucun board trouvé : 14 jours
   6. Score       grille ICP -> tier A / B / C + angle d'approche ; score enregistré dans l'historique
   7. LinkedIn    page entreprise pour les tiers A et B : cache 90 jours
-  8. Sortie      data/output/prospects-AAAA-MM-JJ.csv (colonne signaux_recents = changements des 30 derniers
+  8. Sortie      data/output/prospects-AAAA-MM-JJ.csv (un 2e run le même jour
+                 donne -2, -3… : jamais d'écrasement) (colonne signaux_recents = changements des 30 derniers
                  jours) + prospects-latest.csv + resume-AAAA-MM-JJ.md (section « Ce qui a changé »)
 
 Chaque lecture (site, board d'offres) est enregistrée dans data/history.db (voir SCHEMA.md) ; les changements
@@ -332,10 +334,38 @@ def changes_section(changes):
 
 # ---------- 8. Historique et sortie ----------
 
-def previous_run(today):
-    """Dernier fichier daté avant aujourd'hui, pour repérer les nouveautés."""
-    dated = sorted(p for p in OUTPUT.glob("prospects-20*.csv") if p.stem[len("prospects-"):] < today.isoformat())
-    return dated[-1] if dated else None
+_RUN_NAME = re.compile(r"^prospects-(\d{4}-\d{2}-\d{2})(?:-(\d+))?$")
+
+
+def _run_key(path):
+    """prospects-2026-11-12.csv -> (jour, 1) ; prospects-2026-11-12-2.csv -> (jour, 2) ; autre nom -> None.
+
+    Tri sur ce tuple, pas sur le texte : « -10 » vient après « -2 », et le run sans suffixe est le premier du jour.
+    """
+    match = _RUN_NAME.match(Path(path).stem)
+    return (match.group(1), int(match.group(2) or 1)) if match else None
+
+
+def next_output_paths(today):
+    """(csv daté, résumé) libres pour aujourd'hui : suffixe -2, -3… si un run du jour existe déjà."""
+    day = today.isoformat()
+    n = 1
+    while True:
+        tag = day if n == 1 else f"{day}-{n}"
+        csv_path, summary = OUTPUT / f"prospects-{tag}.csv", OUTPUT / f"resume-{tag}.md"
+        if not csv_path.exists() and not summary.exists():
+            return csv_path, summary
+        n += 1
+
+
+def previous_run(current):
+    """Sortie la plus récente strictement antérieure à `current` (chemin du fichier qu'on s'apprête à écrire).
+
+    Inclut un run antérieur du même jour ; ne renvoie jamais `current` lui-même.
+    """
+    key = _run_key(current)
+    runs = [(k, p) for p in OUTPUT.glob("prospects-20*.csv") if (k := _run_key(p)) and k < key]
+    return max(runs)[1] if runs else None
 
 
 def read_rows(path):
@@ -346,8 +376,9 @@ def read_rows(path):
         return list(reader), reader.fieldnames or []
 
 
-def apply_history(rows, today):
-    prev_path = previous_run(today)
+def apply_history(rows, today, current=None):
+    """current : chemin du CSV daté de ce run (défaut : le prochain nom libre pour today)."""
+    prev_path = previous_run(current or next_output_paths(today)[0])
     prev_rows, _ = read_rows(prev_path)
     prev = {r["domaine"]: r for r in prev_rows}
     latest_rows, latest_fields = read_rows(LATEST)
@@ -511,9 +542,9 @@ def run(args, conn, run_id, grid, today, started, warnings, stats):
     if not args.no_linkedin:
         add_linkedin(rows, args.workers, args.timeout, args.refresh)
 
-    user_fields, prev_file = apply_history(rows, today)
+    dated, summary = next_output_paths(today)
+    user_fields, prev_file = apply_history(rows, today, dated)
     fields = PIPELINE_FIELDS + user_fields
-    dated = OUTPUT / f"prospects-{today.isoformat()}.csv"
     write_csv(dated, rows, fields)
     if args.limit:
         print(f"\n(Run partiel : {LATEST.name} n'est pas mis à jour.)")
@@ -526,7 +557,6 @@ def run(args, conn, run_id, grid, today, started, warnings, stats):
     if throttled:
         detail = ", ".join(f"{h} {n}" for h, n in sorted(throttled.items(), key=lambda kv: (-kv[1], kv[0])))
         warnings.append(f"Requêtes ralenties par les serveurs : {sum(throttled.values())} ({detail})")
-    summary = OUTPUT / f"resume-{today.isoformat()}.md"
     tiers, new = write_summary(summary, rows, sources, warnings, prev_file, time.time() - started, len(applied),
                                today=today, changes=changes, throttled=throttled)
 

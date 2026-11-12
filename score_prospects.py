@@ -246,13 +246,17 @@ def scoring_config():
     return grid
 
 
+# Providers essayés quand on devine des slugs : Workable est exclu (429 massifs), il n'est lu que si le site y renvoie.
+GUESS_PROVIDERS = ("greenhouse", "lever", "ashby")
+
+
 def ats_candidates(rec, detection):
     linked = [item.split(":", 1) for item in (detection.get("ats") or "").split(";") if ":" in item]
     if linked:
         return linked, "lien du site"
     label = rec["domain"].split(".")[0]
     guesses = {label, label.replace("-", ""), norm_company(rec["company"])}
-    return [(provider, g) for g in sorted(guesses) if len(g) >= 5 for provider in ATS_API], "slug deviné"
+    return [(provider, g) for g in sorted(guesses) if len(g) >= 5 for provider in GUESS_PROVIDERS], "slug deviné"
 
 
 def _unknown_error(exc):

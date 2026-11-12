@@ -35,6 +35,11 @@ MAX_BYTES = 3_000_000
 # Politesse envers les serveurs (le pipeline tourne avec 24 threads) : limites par hôte.
 HOST_MAX_CONCURRENT = 4    # requêtes simultanées au plus vers un même hôte
 HOST_MIN_INTERVAL = 0.25   # secondes entre deux DÉBUTS de requête vers un même hôte
+# Surcharges par hôte : {hôte: (requêtes simultanées, secondes entre deux débuts de requête)}.
+# Workable renvoie massivement des 429 : une requête à la fois, espacées de 1,5 s.
+HOST_LIMITS = {
+    "apply.workable.com": (1, 1.5),
+}
 THROTTLE_RETRIES = 3       # nouvelles tentatives sur 429 / 503
 RETRY_AFTER_MAX = 30       # plafond de l'attente (Retry-After ou backoff), en secondes
 BACKOFF_BASE = 1.5         # backoff exponentiel : BACKOFF_BASE * 2**essai + gigue
@@ -123,8 +128,9 @@ def _transient(exc):
 class _Host:
     """État d'un hôte : créneaux simultanés, verrou d'espacement, début de la dernière requête."""
 
-    def __init__(self):
-        self.slots = threading.BoundedSemaphore(HOST_MAX_CONCURRENT)
+    def __init__(self, host=""):
+        max_concurrent, self.min_interval = HOST_LIMITS.get(host, (HOST_MAX_CONCURRENT, HOST_MIN_INTERVAL))
+        self.slots = threading.BoundedSemaphore(max_concurrent)
         self.lock = threading.Lock()
         self.last_start = 0.0
 
@@ -139,7 +145,7 @@ def _host_state(host):
     with _HOSTS_LOCK:
         state = _HOSTS.get(host)
         if state is None:
-            state = _HOSTS[host] = _Host()
+            state = _HOSTS[host] = _Host(host)
         return state
 
 
@@ -149,7 +155,7 @@ def _acquire(host):
     state.slots.acquire()
     try:
         with state.lock:
-            wait = state.last_start + HOST_MIN_INTERVAL - time.monotonic()
+            wait = state.last_start + state.min_interval - time.monotonic()
             if wait > 0:
                 time.sleep(wait)
             state.last_start = time.monotonic()
@@ -198,7 +204,7 @@ def _backoff(attempt):
 
 
 def fetch(url, timeout, accept=None, max_bytes=MAX_BYTES, retries=1):
-    """GET -> (url finale, texte), avec limite par hôte (HOST_MAX_CONCURRENT, HOST_MIN_INTERVAL).
+    """GET -> (url finale, texte), avec limite par hôte (HOST_MAX_CONCURRENT, HOST_MIN_INTERVAL, surcharges HOST_LIMITS).
 
     - 429 / 503 : jusqu'à THROTTLE_RETRIES nouvelles tentatives, en attendant Retry-After (plafonné à
       RETRY_AFTER_MAX) ou un backoff exponentiel avec gigue ; chaque réponse est comptée (throttle_stats) ;
