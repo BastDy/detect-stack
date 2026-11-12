@@ -1,0 +1,7 @@
+﻿# Données locales : listes, caches, résultats (jamais sur GitHub)
+data/
+config.json
+.env
+__pycache__/
+*.tmp
+

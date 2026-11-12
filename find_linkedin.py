@@ -8,17 +8,13 @@ import csv
 import html as htmllib
 import re
 import sys
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-)
+from common import OUTPUT, fetch, fetch_home, normalize
+
 SUBPAGES = ["/contact", "/contact-us", "/about", "/about-us", "/company"]
-MAX_BYTES = 3_000_000
 FIELDS = ["domaine", "linkedin", "autres_liens", "pages_analysees", "erreur"]
 
 LINKEDIN_RE = re.compile(
@@ -27,22 +23,6 @@ LINKEDIN_RE = re.compile(
 )
 # Liens de partage / widgets, sans rapport avec la page de l'entreprise.
 IGNORED_SLUGS = {"share", "sharearticle", "shareoffsite", "login", "signup", "feed", "jobs"}
-
-
-def fetch(url, timeout):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.geturl(), resp.read(MAX_BYTES).decode("utf-8", errors="replace")
-
-
-def fetch_home(domain, timeout):
-    last_error = None
-    for url in (f"https://{domain}", f"https://www.{domain}", f"http://{domain}"):
-        try:
-            return fetch(url, timeout)
-        except Exception as exc:
-            last_error = exc
-    raise last_error
 
 
 def extract(text):
@@ -95,16 +75,6 @@ def analyze(domain, timeout):
     }
 
 
-def normalize(value):
-    value = value.strip().lower()
-    if not value or value.startswith("#"):
-        return ""
-    if "://" not in value:
-        value = "//" + value
-    host = urlparse(value).netloc.split("@")[-1].split(":")[0]
-    return host[4:] if host.startswith("www.") else host
-
-
 def domains_from_file(path):
     path = Path(path)
     if path.suffix.lower() != ".csv":
@@ -125,7 +95,7 @@ def main():
     parser = argparse.ArgumentParser(description="Trouve la page LinkedIn entreprise sur les sites d'une liste de domaines.")
     parser.add_argument("domains", nargs="*", help="domaines à analyser (ex. acme.com)")
     parser.add_argument("--file", help="fichier .txt (un domaine par ligne) ou .csv (colonne domain/domaine/website/site/url)")
-    parser.add_argument("--out", default=str(Path(__file__).with_name("find-linkedin.csv")))
+    parser.add_argument("--out", default=str(OUTPUT / "find-linkedin.csv"))
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=10)
     args = parser.parse_args()
@@ -141,6 +111,7 @@ def main():
         rows = list(pool.map(lambda d: analyze(d, args.timeout), domains))
     rows.sort(key=lambda r: (bool(r.get("erreur")), not r.get("linkedin"), r["domaine"]))
 
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS, restval="")
         writer.writeheader()
