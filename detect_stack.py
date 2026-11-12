@@ -91,8 +91,6 @@ def analyze(domain, timeout):
     pages = 1
     scan(html, found)
     for path in SUBPAGES:
-        if found["strong"]:
-            break
         try:
             _, page = fetch(urljoin(base, path), timeout)
         except Exception:
@@ -101,16 +99,16 @@ def analyze(domain, timeout):
         scan(page, found)
 
     # Many sites load HubSpot through Google Tag Manager, so the script never appears in the HTML.
-    if not found["strong"]:
-        for gtm_id in sorted(set(re.findall(r"GTM-[A-Z0-9]{4,10}", html)))[:2]:
-            try:
-                _, container = fetch(f"https://www.googletagmanager.com/gtm.js?id={gtm_id}", timeout)
-            except Exception:
-                continue
-            before = set(found["strong"])
-            scan(container, found)
-            if found["strong"] - before:
-                found["strong"].add("via-gtm")
+    # Always scanned: the container may also reveal competing tools (Pipedrive, Typeform...).
+    for gtm_id in sorted(set(re.findall(r"GTM-[A-Z0-9]{4,10}", html)))[:2]:
+        try:
+            _, container = fetch(f"https://www.googletagmanager.com/gtm.js?id={gtm_id}", timeout)
+        except Exception:
+            continue
+        before = set(found["strong"])
+        scan(container, found)
+        if found["strong"] - before:
+            found["strong"].add("via-gtm")
 
     if not found["ats"]:
         for path in CAREER_PAGES:

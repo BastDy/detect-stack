@@ -380,7 +380,7 @@ def exclusions(records, applied, grid=None):
     return candidates, excluded
 
 
-def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats_min=5, today=None, refresh=False):
+def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats_min=None, today=None, refresh=False):
     """Pipeline de scoring : exclusions -> détection des sites -> offres d'emploi -> score. Renvoie les lignes triées."""
     today = today or date.today()
     try:
@@ -397,8 +397,11 @@ def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats
     detections = det_cache.data()
 
     by_domain = {r["domain"]: r for r in candidates}
+    # Sans surcharge ats_min : on cherche les offres si l'entreprise peut atteindre le tier B grâce à elles.
+    pts = grid["points"]
+    threshold = ats_min if ats_min is not None else grid["tiers"]["B"] - pts["revops_job"] - pts["sales_jobs"]
     ats_targets = [r["domain"] for r in candidates
-                   if score(r, detections.get(r["domain"], {}), {}, today, grid)["score"] >= ats_min]
+                   if score(r, detections.get(r["domain"], {}), {}, today, grid)["score"] >= threshold]
     ats_cache = Cache(cache_dir / "ats.jsonl", 0 if refresh else ATS_MAX_AGE_DAYS)
     run_stage("Offres d'emploi (ATS)", ats_targets,
               lambda d: fetch_jobs(by_domain[d], detections.get(d, {}), timeout), ats_cache, workers)
@@ -445,7 +448,9 @@ def main():
                         help="job_search_tracker.csv, pour exclure les entreprises où tu as postulé (défaut : config.json ou ../ai-job-search)")
     parser.add_argument("--workers", type=int, default=24)
     parser.add_argument("--timeout", type=float, default=10)
-    parser.add_argument("--ats-min", type=int, default=5, help="score minimum avant d'aller chercher les offres d'emploi")
+    parser.add_argument("--ats-min", type=int, default=None,
+                        help="score minimum (sans offres) pour aller chercher les offres d'emploi. Défaut : automatique, "
+                             "toute entreprise pouvant atteindre le tier B grâce aux offres (tier B - points revops_job - points sales_jobs)")
     parser.add_argument("--top", type=int, default=20)
     parser.add_argument("--refresh", action="store_true", help="ignore le cache et réanalyse tout")
     parser.add_argument("--rank-source", action="store_true", help="réécrit le fichier d'entrée trié par rang, avec les colonnes de score (toutes les colonnes existantes sont gardées)")
