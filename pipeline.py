@@ -28,6 +28,7 @@ import yc_companies
 from common import CACHE, INPUTS, OUTPUT, Cache, run_stage
 from score_prospects import (
     OUTPUT_FIELDS, TIER_ORDER, default_tracker, load_applied, parse_date, read_export, score_records,
+    scoring_config,
 )
 
 LINKEDIN_MAX_AGE_DAYS = 90
@@ -215,6 +216,10 @@ def main():
     args = parser.parse_args()
 
     started, today, warnings = time.time(), date.today(), []
+    try:
+        scoring_config()  # une faute de frappe dans config.json arrête le run tout de suite, pas après la collecte
+    except ValueError as exc:
+        sys.exit(f"ERREUR : {exc}")
     OUTPUT.mkdir(parents=True, exist_ok=True)
 
     sources = collect_sources(args, warnings)

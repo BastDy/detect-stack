@@ -53,6 +53,15 @@ AMBIGUOUS_CITIES = {
     "london", "cambridge", "richmond", "richmond hill", "victoria", "surrey", "kingston", "hamilton", "burlington",
     "waterloo", "halifax", "dartmouth", "laval", "scarborough", "brampton", "pickering", "whitby", "markham",
 }
+# Grille de score par défaut. config.json peut en surcharger une partie sous la clé "scoring",
+# avec la même structure (ex. {"scoring": {"points": {"funding": 4}, "tiers": {"A": 13}}}).
+DEFAULT_SCORING = {
+    "points": {"saas": 3, "size": 2, "hubspot": 2, "ontario": 2, "canada": 1,
+               "revops_job": 5, "funding": 3, "sales_jobs": 2, "other_crm": 3},
+    "size": {"min": 20, "max": 200, "exclude_below": 10},  # fourchette ICP ; exclusion sous exclude_below salariés
+    "signals": {"sales_jobs_min": 3, "funding_days": 365},
+    "tiers": {"A": 12, "B": 8},  # score minimum de chaque tier, C en dessous
+}
 PROVINCES = {name.lower(): name for name in PROVINCE_CODES.values()} | {code.lower(): name for code, name in PROVINCE_CODES.items()}
 OUTPUT_FIELDS = [
     "tier", "score", "entreprise", "domaine", "detail_score", "angle_suggere",
@@ -151,6 +160,31 @@ def fetch_json(url, timeout):
     return json.loads(fetch_text(url, timeout))
 
 
+def scoring_config():
+    """Grille de score : DEFAULT_SCORING surchargée par la clé "scoring" de config.json.
+
+    Lève ValueError sur une clé inconnue (faute de frappe) ou une valeur non numérique.
+    """
+    custom = load_config().get("scoring", {})
+    if not isinstance(custom, dict):
+        raise ValueError("config.json : \"scoring\" doit être un objet {...}")
+    grid = {section: dict(values) for section, values in DEFAULT_SCORING.items()}
+    for section, values in custom.items():
+        if section not in grid:
+            raise ValueError(f"config.json : section de scoring inconnue « {section} » "
+                             f"(sections possibles : {', '.join(grid)})")
+        if not isinstance(values, dict):
+            raise ValueError(f"config.json : scoring.{section} doit être un objet {{...}}")
+        for key, value in values.items():
+            if key not in grid[section]:
+                raise ValueError(f"config.json : clé inconnue « scoring.{section}.{key} » "
+                                 f"(clés possibles : {', '.join(grid[section])})")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"config.json : scoring.{section}.{key} doit être un nombre (lu : {value!r})")
+            grid[section][key] = value
+    return grid
+
+
 def ats_candidates(rec, detection):
     linked = [item.split(":", 1) for item in (detection.get("ats") or "").split(";") if ":" in item]
     if linked:
@@ -209,7 +243,9 @@ def parse_date(value):
     return None
 
 
-def score(rec, det, jobs, today):
+def score(rec, det, jobs, today, grid=None):
+    grid = grid or DEFAULT_SCORING
+    pts, size, signals, tiers = grid["points"], grid["size"], grid["signals"], grid["tiers"]
     points, detail = 0, []
 
     def add(n, label):
@@ -224,26 +260,29 @@ def score(rec, det, jobs, today):
     revops_jobs = [t for t in titles if REVOPS_TITLE.search(t)]
     sales_jobs = [t for t in titles if SALES_TITLE.search(t) and not REVOPS_TITLE.search(t)]
     raised = parse_date(rec["last_raised"])
+    recent_raise = bool(raised) and (today - raised).days <= signals["funding_days"]
+    many_sales_jobs = len(sales_jobs) >= signals["sales_jobs_min"]
+    window = "12 mois" if signals["funding_days"] == 365 else f"{signals['funding_days']} jours"
 
     if SAAS_INDUSTRY.search(rec["industry"]) or "saas" in rec["keywords"].lower() or len(saas_hints) >= 2:
-        add(3, "SaaS/tech")
+        add(pts["saas"], "SaaS/tech")
     employees = parse_int(rec["employees"])
-    if employees is not None and 20 <= employees <= 200:
-        add(2, "20-200 salariés")
+    if employees is not None and size["min"] <= employees <= size["max"]:
+        add(pts["size"], f"{size['min']}-{size['max']} salariés")
     if hubspot:
-        add(2, "HubSpot")
+        add(pts["hubspot"], "HubSpot")
     if rec["state"].lower() in {"ontario", "on"}:
-        add(2, "Ontario")
+        add(pts["ontario"], "Ontario")
     elif rec["country"].lower() == "canada" or (not rec["country"] and rec["domain"].endswith(".ca")):
-        add(1, "Canada")
+        add(pts["canada"], "Canada")
     if revops_jobs:
-        add(5, "Offre RevOps/Ops ouverte")
-    if raised and (today - raised).days <= 365:
-        add(3, "Levée < 12 mois")
-    if len(sales_jobs) >= 3:
-        add(2, "3+ offres sales/marketing")
+        add(pts["revops_job"], "Offre RevOps/Ops ouverte")
+    if recent_raise:
+        add(pts["funding"], f"Levée < {window}")
+    if many_sales_jobs:
+        add(pts["sales_jobs"], f"{signals['sales_jobs_min']}+ offres sales/marketing")
     if hubspot and others & COMPETITOR_CRM:
-        add(3, "Autre CRM visible")
+        add(pts["other_crm"], "Autre CRM visible")
 
     angles = []
     if revops_jobs:
@@ -259,12 +298,12 @@ def score(rec, det, jobs, today):
         angles.append("Conversations clients hors HubSpot")
     if hubspot and "Typeform" in others:
         angles.append("Leads Typeform mal reliés au CRM")
-    if len(sales_jobs) >= 3:
+    if many_sales_jobs:
         angles.append(f"{len(sales_jobs)} offres sales/marketing : structurer process et reporting avant l'arrivée des recrues")
-    if raised and (today - raised).days <= 365:
+    if recent_raise:
         angles.append("Levée récente : structurer le RevOps pour la croissance")
 
-    tier = "A" if points >= 12 else "B" if points >= 8 else "C"
+    tier = "A" if points >= tiers["A"] else "B" if points >= tiers["B"] else "C"
     return {
         "tier": tier,
         "score": points,
@@ -326,15 +365,16 @@ def write_ranked_source(path, rows):
     return rank
 
 
-def exclusions(records, applied):
-    """Sépare les entreprises à analyser de celles à écarter (candidature CDI, moins de 10 salariés)."""
+def exclusions(records, applied, grid=None):
+    """Sépare les entreprises à analyser de celles à écarter (candidature CDI, trop peu de salariés)."""
+    min_size = (grid or DEFAULT_SCORING)["size"]["exclude_below"]
     excluded, candidates = {}, []
     for rec in records:
         employees = parse_int(rec["employees"])
         if norm_company(rec["company"]) in applied:
             excluded[rec["domain"]] = "Exclu : candidature CDI"
-        elif employees is not None and employees < 10:
-            excluded[rec["domain"]] = "Exclu : moins de 10 salariés"
+        elif employees is not None and employees < min_size:
+            excluded[rec["domain"]] = f"Exclu : moins de {min_size} salariés"
         else:
             candidates.append(rec)
     return candidates, excluded
@@ -343,7 +383,11 @@ def exclusions(records, applied):
 def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats_min=5, today=None, refresh=False):
     """Pipeline de scoring : exclusions -> détection des sites -> offres d'emploi -> score. Renvoie les lignes triées."""
     today = today or date.today()
-    candidates, excluded = exclusions(records, applied)
+    try:
+        grid = scoring_config()
+    except ValueError as exc:
+        sys.exit(f"ERREUR : {exc}")
+    candidates, excluded = exclusions(records, applied, grid)
     print(f"{len(excluded)} exclues · {len(candidates)} à analyser", flush=True)
 
     cache_dir = Path(cache_dir)
@@ -354,7 +398,7 @@ def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats
 
     by_domain = {r["domain"]: r for r in candidates}
     ats_targets = [r["domain"] for r in candidates
-                   if score(r, detections.get(r["domain"], {}), {}, today)["score"] >= ats_min]
+                   if score(r, detections.get(r["domain"], {}), {}, today, grid)["score"] >= ats_min]
     ats_cache = Cache(cache_dir / "ats.jsonl", 0 if refresh else ATS_MAX_AGE_DAYS)
     run_stage("Offres d'emploi (ATS)", ats_targets,
               lambda d: fetch_jobs(by_domain[d], detections.get(d, {}), timeout), ats_cache, workers)
@@ -373,7 +417,7 @@ def score_records(records, applied, cache_dir=CACHE, workers=24, timeout=10, ats
             rows.append({**base, "tier": excluded[rec["domain"]], "score": ""})
             continue
         job_data = jobs.get(rec["domain"], {})
-        rows.append({**base, **score(rec, det, job_data, today), "ats": job_data.get("ats", "")})
+        rows.append({**base, **score(rec, det, job_data, today, grid), "ats": job_data.get("ats", "")})
     rows.sort(key=lambda r: (TIER_ORDER.get(r["tier"], 3), -(r["score"] or 0), r["entreprise"]))
     return rows, excluded
 

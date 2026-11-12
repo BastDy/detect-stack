@@ -63,6 +63,8 @@ The scripts also work on their own: `detect_stack.py acme.com`, `score_prospects
 
 The job-search tracker is read from `../ai-job-search/job_search_tracker.csv` by default. To point elsewhere, copy `config.example.json` to `config.json` and set `job_tracker`, or pass `--tracker`. If the file is missing, the run says so loudly instead of silently skipping the exclusions.
 
+The scoring grid can be tuned in the same file under `scoring`, without touching the code: `points` (`saas`, `size`, `hubspot`, `ontario`, `canada`, `revops_job`, `funding`, `sales_jobs`, `other_crm`), `size` (`min`, `max`, `exclude_below`), `signals` (`sales_jobs_min`, `funding_days`) and `tiers` (`A`, `B`). Only the keys you set override the defaults (the grid above); an unknown key stops the run with an explicit error, to catch typos.
+
 ## Reliability choices
 
 - **Caches expire**: site stack after 30 days, job postings after 3 days, LinkedIn after 90 days. An unreachable site is retried on the next run instead of staying "error" forever.

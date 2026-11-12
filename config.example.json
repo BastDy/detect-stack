@@ -1,4 +1,8 @@
-﻿{
-  "job_tracker": "C:/Users/<toi>/Documents/Claude Projects/ai-job-search/job_search_tracker.csv"
+{
+  "job_tracker": "C:/Users/<toi>/Documents/Claude Projects/ai-job-search/job_search_tracker.csv",
+  "scoring": {
+    "points": {"revops_job": 5, "funding": 3},
+    "size": {"min": 20, "max": 200},
+    "tiers": {"A": 12, "B": 8}
+  }
 }
-
