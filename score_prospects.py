@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
 
-from common import CACHE, CITY_PROVINCE, HERE, OUTPUT, Cache, fetch, load_config, normalize
+from common import CACHE, CITY_PROVINCE, HERE, OUTPUT, PROVINCE_CODES, Cache, fetch, load_config, normalize
 from detect_stack import analyze
 
 # TTL des caches : les offres d'emploi bougent vite, la stack technique beaucoup moins.
@@ -46,6 +46,13 @@ ATS_API = {
     "workable": ("https://apply.workable.com/api/v1/widget/accounts/{slug}", lambda d: [j["title"] for j in d.get("jobs", [])]),
 }
 TIER_ORDER = {"A": 0, "B": 1, "C": 2}
+# Villes de CITY_PROVINCE qui existent aussi hors du Canada (London UK, Cambridge MA, Victoria AU…) :
+# on n'en déduit la province que s'il y a une preuve canadienne.
+AMBIGUOUS_CITIES = {
+    "london", "cambridge", "richmond", "richmond hill", "victoria", "surrey", "kingston", "hamilton", "burlington",
+    "waterloo", "halifax", "dartmouth", "laval", "scarborough", "brampton", "pickering", "whitby", "markham",
+}
+PROVINCES = {name.lower(): name for name in PROVINCE_CODES.values()} | {code.lower(): name for code, name in PROVINCE_CODES.items()}
 OUTPUT_FIELDS = [
     "tier", "score", "entreprise", "domaine", "detail_score", "angle_suggere",
     "offres_revops", "nb_offres_sales_marketing", "ats", "employes", "secteur",
@@ -70,25 +77,51 @@ def read_export(path):
         if not cols["website"]:
             raise ValueError(f"{path} : colonne du site web introuvable (colonnes lues : {', '.join(reader.fieldnames or [])})")
         records, without_site = {}, 0
+        # Apollo "Location (Canada)" : le nom de colonne lui-même garantit que la ville est canadienne.
+        canadian_source = "canada" in (cols["city"] or "").lower()
         for row in reader:
             rec = {key: (row.get(col) or "").strip() if col else "" for key, col in cols.items()}
             rec["domain"] = normalize(rec["website"])
             if not rec["domain"]:
                 without_site += 1
                 continue
-            fill_location(rec)
+            fill_location(rec, canadian_source=canadian_source)
             records.setdefault(rec["domain"], rec)
     missing = [key for key, col in cols.items() if col is None]
     return list(records.values()), without_site, missing
 
 
-def fill_location(rec):
-    """Déduit province et pays de la ville quand l'export ne les donne pas (ex. Apollo 'Location (Canada)')."""
-    city = rec["city"].split(",")[0].strip().lower()
-    province = CITY_PROVINCE.get(city)
-    if province and not rec["state"]:
-        rec["state"] = province
-    if province and not rec["country"]:
+def province_of(value):
+    """'ON', 'ontario', 'Ontario, Canada' -> 'Ontario' ; None si ce n'est pas une province canadienne."""
+    return PROVINCES.get(value.split(",")[0].strip().lower()) if value else None
+
+
+def fill_location(rec, canadian_source=False):
+    """Déduit province et pays de la ville quand l'export ne les donne pas.
+
+    Une ville ambiguë (London, Cambridge…) n'est rattachée au Canada qu'avec une preuve : pays Canada,
+    domaine .ca, state ou suffixe de ville ("London, ON") qui est une province, ou source canadienne.
+    Un state / pays / suffixe étranger ("England", "CA", "Cambridge, MA") bloque toute déduction.
+    """
+    city, _, suffix = (part.strip() for part in rec["city"].partition(","))
+    province = CITY_PROVINCE.get(city.lower())
+    country, state = rec["country"].strip().lower(), rec["state"].strip()
+    suffix_province = province_of(suffix)
+    if not province:
+        return
+    # Indice étranger explicite : pays non canadien, state qui n'est pas une province, "Cambridge, MA".
+    foreign_country = country and country != "canada"
+    foreign_state = state and not province_of(state)
+    foreign_suffix = suffix and not suffix_province and suffix.lower() != "canada"
+    if foreign_country or foreign_state or foreign_suffix:
+        return
+    canadian = (country == "canada" or rec["domain"].endswith(".ca") or canadian_source
+                or state or suffix)  # à ce stade, un state ou un suffixe non vide est forcément canadien
+    if city.lower() in AMBIGUOUS_CITIES and not canadian:
+        return
+    if not state:
+        rec["state"] = suffix_province or province
+    if not country:
         rec["country"] = "Canada"
 
 
