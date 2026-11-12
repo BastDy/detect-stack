@@ -4,7 +4,7 @@ import csv
 import json
 import re
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from common import (
@@ -40,11 +40,98 @@ SALES_TITLE = re.compile(
     re.I,
 )
 COMPETITOR_CRM = {"Salesforce Pardot", "Salesforce Web-to-Lead", "Marketo", "Pipedrive", "Zoho"}
+LEADERSHIP_TITLE = re.compile(
+    r"\b(?:vp|vice[- ]president)\b.*\b(?:sales|revenue|marketing|growth|customer success)\b"
+    r"|\bcro\b|\bcmo\b"
+    r"|chief (?:revenue|commercial|marketing|growth|customer) officer"
+    r"|head of (?:sales|revenue|marketing|growth|gtm|go-to-market|customer success)"
+    r"|director,? (?:of )?(?:sales|revenue|marketing|growth|demand gen\w*|customer success)",
+    re.I,
+)
+
+
+def job_category(title):
+    """'revops' | 'leadership' | 'sales' | 'other' (priorité dans cet ordre)."""
+    title = title or ""
+    if REVOPS_TITLE.search(title):
+        return "revops"
+    if LEADERSHIP_TITLE.search(title):
+        return "leadership"
+    if SALES_TITLE.search(title):
+        return "sales"
+    return "other"
+
+
+def _s(value):
+    return value.strip() if isinstance(value, str) else (str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else "")
+
+
+def _iso_date(value):
+    """Timestamp ms/s, ISO 8601 ou 'YYYY-MM-DD' -> 'YYYY-MM-DD' ; "" si illisible."""
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            ts = value / 1000 if value > 1e11 else value
+            return datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+        if isinstance(value, str) and re.match(r"\d{4}-\d{2}-\d{2}", value.strip()):
+            return value.strip()[:10]
+    except (ValueError, OverflowError, OSError):
+        pass
+    return ""
+
+
+def _posting(pid, title, location, url, published):
+    title = _s(title)
+    if not title:
+        return None
+    return {
+        "posting_id": _s(pid) or norm_company(title) or title.lower(),
+        "title": title, "location": _s(location), "url": _s(url), "published_at": _iso_date(published),
+        "category": job_category(title),
+    }
+
+
+def _items(payload, key="jobs"):
+    items = payload.get(key) if isinstance(payload, dict) else payload
+    return [j for j in items if isinstance(j, dict)] if isinstance(items, list) else []
+
+
+def _dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _greenhouse(d):
+    # first_published n'existe que sur certains boards ; updated_at n'est pas une date de publication.
+    return [_posting(j.get("id"), j.get("title"), _dict(j.get("location")).get("name"), j.get("absolute_url"), j.get("first_published"))
+            for j in _items(d)]
+
+
+def _lever(d):
+    return [_posting(j.get("id"), j.get("text"), _dict(j.get("categories")).get("location"), j.get("hostedUrl"), j.get("createdAt"))
+            for j in _items(d, None)]
+
+
+def _ashby(d):
+    return [_posting(j.get("id"), j.get("title"), j.get("location"), j.get("jobUrl"), j.get("publishedAt")) for j in _items(d)]
+
+
+def _workable(d):
+    out = []
+    for j in _items(d):
+        place = ", ".join(x for x in (_s(j.get("city")), _s(j.get("country"))) if x)
+        out.append(_posting(j.get("shortcode") or j.get("id"), j.get("title"), place, j.get("url"),
+                            j.get("published_on") or j.get("created_at")))
+    return out
+
+
+def _postings(extractor, payload):
+    return [p for p in extractor(payload) if p]
+
+
 ATS_API = {
-    "greenhouse": ("https://boards-api.greenhouse.io/v1/boards/{slug}/jobs", lambda d: [j["title"] for j in d.get("jobs", [])]),
-    "lever": ("https://api.lever.co/v0/postings/{slug}?mode=json&limit=100", lambda d: [j["text"] for j in d] if isinstance(d, list) else []),
-    "ashby": ("https://api.ashbyhq.com/posting-api/job-board/{slug}", lambda d: [j["title"] for j in d.get("jobs", [])]),
-    "workable": ("https://apply.workable.com/api/v1/widget/accounts/{slug}", lambda d: [j["title"] for j in d.get("jobs", [])]),
+    "greenhouse": ("https://boards-api.greenhouse.io/v1/boards/{slug}/jobs", _greenhouse),
+    "lever": ("https://api.lever.co/v0/postings/{slug}?mode=json&limit=100", _lever),
+    "ashby": ("https://api.ashbyhq.com/posting-api/job-board/{slug}", _ashby),
+    "workable": ("https://apply.workable.com/api/v1/widget/accounts/{slug}", _workable),
 }
 TIER_ORDER = {"A": 0, "B": 1, "C": 2}
 # Villes de CITY_PROVINCE qui existent aussi hors du Canada (London UK, Cambridge MA, Victoria AU…) :
@@ -217,13 +304,14 @@ def fetch_jobs(rec, detection, timeout):
         try:
             raw = fetch_text(url.format(slug=slug), timeout)
             payload = json.loads(raw)
-            titles = extract(payload)
+            postings = _postings(extract, payload)[:300]
+            titles = [p["title"] for p in postings]
         except Exception:
             continue
         if source == "lien du site":
-            return {"ats": f"{provider}:{slug} ({source})", "titles": titles[:300]}
+            return {"ats": f"{provider}:{slug} ({source})", "titles": titles, "postings": postings}
         if titles and board_belongs_to(rec, provider, slug, raw, payload, timeout):
-            return {"ats": f"{provider}:{slug} (slug deviné, vérifié)", "titles": titles[:300]}
+            return {"ats": f"{provider}:{slug} (slug deviné, vérifié)", "titles": titles, "postings": postings}
     return {"ats": "", "titles": []}
 
 
