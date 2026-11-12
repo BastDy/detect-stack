@@ -116,7 +116,8 @@ class Cache:
         self.path = Path(path)
         self.max_age = timedelta(days=max_age_days)
         self.error_age = min(timedelta(days=error_age_days), self.max_age)
-        self.now = now or datetime.now()
+        # Tronqué aux secondes : même précision que l'horodatage écrit par put().
+        self.now = (now or datetime.now()).replace(microsecond=0)
         self.entries = {}
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():
