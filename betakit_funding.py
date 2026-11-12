@@ -10,7 +10,7 @@ import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
-from common import CACHE, CITY_PROVINCE, SOURCES, UA, normalize
+from common import CACHE, CITY_PROVINCE, SOURCES, UA, norm_company, normalize
 
 API = (
     "https://betakit.com/wp-json/wp/v2/posts?tags=2252&after={after}T00:00:00"
@@ -61,10 +61,6 @@ FIELDS = [
 ]
 
 
-def norm(text):
-    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
-
-
 def fetch_posts(after):
     posts, page, pages = [], 1, 1
     while page <= pages:
@@ -106,13 +102,13 @@ def locate(text):
 
 
 def website(content, company):
-    target = norm(company)
+    target = norm_company(company)
     for href, label in re.findall(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', content, re.S):
         domain = normalize(html.unescape(href))
         if not domain or domain.endswith(".gov") or any(domain == d or domain.endswith("." + d) for d in IGNORED_DOMAINS):
             continue
-        label = norm(re.sub(r"<[^>]+>", "", html.unescape(label)))
-        if target and (target in norm(domain) or label == target):
+        label = norm_company(re.sub(r"<[^>]+>", "", html.unescape(label)))
+        if target and (target in norm_company(domain) or label == target):
             return domain
     return ""
 
@@ -162,7 +158,7 @@ def run(months=12, out=DEFAULT_OUT, refresh=False):
         if not province and not CANADIAN_ENTITY.search(text[:1200]):
             skipped["hors Canada ou localisation introuvable"] += 1
             continue
-        key = norm(company)
+        key = norm_company(company)
         if key in rows:
             skipped["doublon (levée plus ancienne)"] += 1
             continue
@@ -195,7 +191,7 @@ def run(months=12, out=DEFAULT_OUT, refresh=False):
             reader = csv.DictReader(f)
             # Hand-added columns (Sélection, Notes…) survive a refresh; ranking columns are recomputed by score_prospects.py.
             user_fields += [c for c in reader.fieldnames or [] if c not in FIELDS and c not in RANK_FIELDS]
-            previous = {norm(r.get("Company")): r for r in reader}
+            previous = {norm_company(r.get("Company")): r for r in reader}
         for key, row in rows.items():
             old = previous.get(key, {})
             for field in user_fields:

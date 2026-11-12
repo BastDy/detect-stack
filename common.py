@@ -2,11 +2,15 @@
 
 Stdlib uniquement, pour que le projet tourne sans rien installer.
 """
+import csv
 import json
+import re
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -158,3 +162,43 @@ class Cache:
 
     def data(self):
         return {d: e["data"] for d, e in self.entries.items() if self._fresh(e)}
+
+
+def domains_from_file(path):
+    path = Path(path)
+    if path.suffix.lower() != ".csv":
+        return path.read_text(encoding="utf-8").splitlines()
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        column = next(
+            (c for c in reader.fieldnames or [] if c.strip().lower() in {"domain", "domaine", "website", "site", "url"}),
+            None,
+        )
+        if column is None:
+            sys.exit(f"{path} : aucune colonne domain / domaine / website / site / url")
+        return [row[column] for row in reader]
+
+
+def norm_company(name):
+    """Nom d'entreprise réduit à [a-z0-9], pour comparer sans tenir compte de la casse ni de la ponctuation."""
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def run_stage(label, domains, worker, cache, workers):
+    """Applique worker aux domaines absents ou expirés du cache, en parallèle, en sauvegardant au fil de l'eau."""
+    todo = cache.stale(domains)
+    print(f"{label} : {len(domains) - len(todo)} déjà en cache, {len(todo)} à traiter", flush=True)
+    if todo:
+        cache.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache.path, "a", encoding="utf-8") as out, ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(worker, d): d for d in todo}
+            for done, future in enumerate(as_completed(futures), 1):
+                domain = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:  # un domaine qui plante ne doit pas arrêter le run
+                    result = {"erreur": f"{type(exc).__name__}: {exc}"[:150]}
+                cache.put(domain, result, out)
+                if done % 100 == 0 or done == len(todo):
+                    print(f"  {label} {done}/{len(todo)}", flush=True)
+    cache.compact()

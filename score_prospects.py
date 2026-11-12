@@ -4,11 +4,12 @@ import csv
 import json
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
 
-from common import CACHE, CITY_PROVINCE, HERE, OUTPUT, PROVINCE_CODES, Cache, fetch, load_config, normalize
+from common import (
+    CACHE, CITY_PROVINCE, HERE, OUTPUT, PROVINCE_CODES, Cache, fetch, load_config, norm_company, normalize, run_stage,
+)
 from detect_stack import analyze
 
 # TTL des caches : les offres d'emploi bougent vite, la stack technique beaucoup moins.
@@ -125,10 +126,6 @@ def fill_location(rec, canadian_source=False):
         rec["country"] = "Canada"
 
 
-def norm_company(name):
-    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
-
-
 def default_tracker():
     """Chemin du tracker de candidatures : config.json > dossier voisin ai-job-search."""
     configured = load_config().get("job_tracker")
@@ -144,26 +141,6 @@ def applied_companies(path):
         raise FileNotFoundError(f"Tracker de candidatures introuvable : {path}")
     with open(path, encoding="utf-8-sig", newline="") as f:
         return {norm_company(row.get("company")) for row in csv.DictReader(f)} - {""}
-
-
-def run_stage(label, domains, worker, cache, workers):
-    """Applique worker aux domaines absents ou expirés du cache, en parallèle, en sauvegardant au fil de l'eau."""
-    todo = cache.stale(domains)
-    print(f"{label} : {len(domains) - len(todo)} déjà en cache, {len(todo)} à traiter", flush=True)
-    if todo:
-        cache.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache.path, "a", encoding="utf-8") as out, ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(worker, d): d for d in todo}
-            for done, future in enumerate(as_completed(futures), 1):
-                domain = futures[future]
-                try:
-                    result = future.result()
-                except Exception as exc:  # un domaine qui plante ne doit pas arrêter le run
-                    result = {"erreur": f"{type(exc).__name__}: {exc}"[:150]}
-                cache.put(domain, result, out)
-                if done % 100 == 0 or done == len(todo):
-                    print(f"  {label} {done}/{len(todo)}", flush=True)
-    cache.compact()
 
 
 def fetch_text(url, timeout):

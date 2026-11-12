@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import unquote, urljoin
 
-from common import OUTPUT, fetch, fetch_home, normalize
+from common import OUTPUT, domains_from_file, fetch, fetch_home, normalize
 
 SUBPAGES = ["/contact", "/contact-us", "/about", "/about-us", "/company"]
 FIELDS = ["domaine", "linkedin", "autres_liens", "pages_analysees", "erreur"]
@@ -73,21 +73,6 @@ def analyze(domain, timeout):
         "pages_analysees": pages,
         "erreur": "",
     }
-
-
-def domains_from_file(path):
-    path = Path(path)
-    if path.suffix.lower() != ".csv":
-        return path.read_text(encoding="utf-8").splitlines()
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        column = next(
-            (c for c in reader.fieldnames or [] if c.strip().lower() in {"domain", "domaine", "website", "site", "url"}),
-            None,
-        )
-        if column is None:
-            sys.exit(f"{path} : aucune colonne domain / domaine / website / site / url")
-        return [row[column] for row in reader]
 
 
 def main():

@@ -7,6 +7,10 @@ import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+# Les print du code contiennent des flèches : évite le plantage cp1252 quand la sortie est redirigée.
+for _stream in (sys.stdout, sys.stderr):
+    _stream.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import betakit_funding  # noqa: E402

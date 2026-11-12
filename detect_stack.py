@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urljoin
 
-from common import OUTPUT, UA, fetch, fetch_home, normalize  # noqa: F401  (UA/normalize réexportés)
+from common import OUTPUT, UA, domains_from_file, fetch, fetch_home, normalize  # noqa: F401  (UA/normalize réexportés)
 
 SUBPAGES = ["/contact", "/contact-us", "/demo", "/pricing"]
 CAREER_PAGES = ["/careers", "/jobs"]
@@ -142,21 +142,6 @@ def analyze(domain, timeout):
         "pages_analysees": pages,
         "erreur": "",
     }
-
-
-def domains_from_file(path):
-    path = Path(path)
-    if path.suffix.lower() != ".csv":
-        return path.read_text(encoding="utf-8").splitlines()
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        column = next(
-            (c for c in reader.fieldnames or [] if c.strip().lower() in {"domain", "domaine", "website", "site", "url"}),
-            None,
-        )
-        if column is None:
-            sys.exit(f"{path} : aucune colonne domain / domaine / website / site / url")
-        return [row[column] for row in reader]
 
 
 def domains_from_tracker(path):

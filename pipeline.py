@@ -25,7 +25,7 @@ from pathlib import Path
 import betakit_funding
 import find_linkedin
 import yc_companies
-from common import CACHE, INPUTS, OUTPUT, Cache
+from common import CACHE, INPUTS, OUTPUT, Cache, run_stage
 from score_prospects import (
     OUTPUT_FIELDS, TIER_ORDER, default_tracker, load_applied, parse_date, read_export, score_records,
 )
@@ -62,9 +62,10 @@ def collect_sources(args, warnings):
 
     inputs = Path(args.inputs)
     inputs.mkdir(parents=True, exist_ok=True)
-    for path in sorted(inputs.glob("*.csv")):
+    exports = sorted(inputs.glob("*.csv"))
+    for path in exports:
         sources.append((path.stem, path))
-    if not any(Path(args.inputs).glob("*.csv")):
+    if not exports:
         print(f"\n(Aucun export dans {inputs} : pose-y tes exports Apollo/Clay en CSV pour les inclure.)", flush=True)
     return sources
 
@@ -103,8 +104,6 @@ def merge_sources(sources, warnings):
 # ---------- 7. LinkedIn ----------
 
 def add_linkedin(rows, workers, timeout, refresh):
-    from score_prospects import run_stage
-
     targets = [r["domaine"] for r in rows if r["tier"] in {"A", "B"} and not r.get("linkedin")]
     cache = Cache(CACHE / "linkedin.jsonl", 0 if refresh else LINKEDIN_MAX_AGE_DAYS)
     run_stage("LinkedIn (tiers A et B)", targets, lambda d: find_linkedin.analyze(d, timeout), cache, workers)
@@ -131,7 +130,8 @@ def read_rows(path):
 
 
 def apply_history(rows, today):
-    prev_rows, _ = read_rows(previous_run(today))
+    prev_path = previous_run(today)
+    prev_rows, _ = read_rows(prev_path)
     prev = {r["domaine"]: r for r in prev_rows}
     latest_rows, latest_fields = read_rows(LATEST)
     latest = {r["domaine"]: r for r in latest_rows}
@@ -151,7 +151,7 @@ def apply_history(rows, today):
             r["nouveau"] = ""
         for field in user_fields:
             r[field] = latest.get(r["domaine"], {}).get(field, "")
-    return user_fields, previous_run(today)
+    return user_fields, prev_path
 
 
 def write_csv(path, rows, fields):
