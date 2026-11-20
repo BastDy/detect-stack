@@ -335,6 +335,18 @@ def domains_from_file(path):
         return [row[column] for row in reader]
 
 
+_FORMULA_START = ("=", "+", "-", "@", chr(9), chr(13))  # tab, CR
+_NUMBER = re.compile(r"[+-]?\d+(?:[.,]\d+)?%?")
+
+
+def csv_safe(rows):
+    """Neutralise les cellules qu'Excel prendrait pour une formule (texte récupéré sur le web : =HYPERLINK(…), +cmd…).
+    Préfixe une apostrophe ; laisse les nombres (-3, +5 %) intacts. Idempotent."""
+    for row in rows:
+        yield {k: ("'" + v if isinstance(v, str) and v.startswith(_FORMULA_START) and not _NUMBER.fullmatch(v.strip()) else v)
+               for k, v in row.items()}
+
+
 def norm_company(name):
     """Nom d'entreprise réduit à [a-z0-9], pour comparer sans tenir compte de la casse ni de la ponctuation."""
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())

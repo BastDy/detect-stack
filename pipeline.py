@@ -43,6 +43,7 @@ import posting_signals
 import timing
 import yc_companies
 from common import (
+    csv_safe,
     CACHE, INPUTS, OUTPUT, Cache, is_error, job_category, normalize, reset_throttle_stats, run_stage, throttle_stats,
 )
 from score_prospects import (
@@ -417,7 +418,7 @@ def write_csv(path, rows, fields):
             with open(path, "w", encoding="utf-8-sig", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=fields, restval="", extrasaction="ignore")
                 writer.writeheader()
-                writer.writerows(rows)
+                writer.writerows(csv_safe(rows))
             return
         except PermissionError:
             if attempt == 2:

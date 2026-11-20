@@ -10,3 +10,7 @@ __pycache__/
 *.db-wal
 *.db-shm
 *.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.bak

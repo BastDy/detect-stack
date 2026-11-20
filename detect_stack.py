@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urljoin
 
-from common import OUTPUT, UA, domains_from_file, fetch, fetch_home, normalize  # noqa: F401  (UA/normalize réexportés)
+from common import OUTPUT, UA, csv_safe, domains_from_file, fetch, fetch_home, normalize  # noqa: F401  (UA/normalize réexportés)
 
 SUBPAGES = ["/contact", "/contact-us", "/demo", "/pricing"]
 CAREER_PAGES = ["/careers", "/jobs"]
@@ -183,7 +183,7 @@ def main():
     with open(args.out, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS, restval="")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(csv_safe(rows))
 
     for r in rows:
         details = r.get("signaux_hubspot") or r.get("erreur") or ""

@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import unquote, urljoin
 
-from common import OUTPUT, domains_from_file, fetch, fetch_home, normalize
+from common import OUTPUT, csv_safe, domains_from_file, fetch, fetch_home, normalize
 
 SUBPAGES = ["/contact", "/contact-us", "/about", "/about-us", "/company"]
 FIELDS = ["domaine", "linkedin", "autres_liens", "pages_analysees", "erreur"]
@@ -100,7 +100,7 @@ def main():
     with open(args.out, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS, restval="")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(csv_safe(rows))
 
     for r in rows:
         print(f"{r['domaine']:<32} {r.get('linkedin') or r.get('erreur') or '(non trouvé)'}")

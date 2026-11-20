@@ -10,7 +10,7 @@ import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
-from common import CACHE, CITY_PROVINCE, SOURCES, UA, norm_company, normalize
+from common import CACHE, CITY_PROVINCE, SOURCES, UA, csv_safe, norm_company, normalize
 
 API = (
     "https://betakit.com/wp-json/wp/v2/posts?tags=2252&after={after}T00:00:00"
@@ -205,7 +205,7 @@ def run(months=12, out=DEFAULT_OUT, refresh=False):
     with open(out, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows.values())
+        writer.writerows(csv_safe(rows.values()))
 
     kept = list(rows.values())
     print(f"\n{len(posts)} articles · {len(kept)} startups canadiennes retenues")
