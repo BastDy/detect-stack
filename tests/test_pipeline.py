@@ -55,8 +55,9 @@ class TestScore(unittest.TestCase):
         det = {"hubspot": "Oui", "autres_outils": "Pipedrive, Calendly"}
         jobs = {"titles": ["Revenue Operations Manager", "Account Executive", "SDR", "Growth Marketer"]}
         out = sp.score(r, det, jobs, TODAY)
-        # SaaS 3 + taille 2 + HubSpot 2 + Ontario 2 + RevOps 5 + levée 3 + 3 offres sales 2 + autre CRM 3
-        self.assertEqual(out["score"], 22)
+        # Profil : SaaS 3 + taille 2 + HubSpot 2 + Ontario 2 + autre CRM 3 = 12
+        # Timing : RevOps 5 + levée de 163 j 2 (3 avec une demi-vie de 180 j) + 3 offres sales 2 = 9
+        self.assertEqual((out["score"], out["score_profil"], out["score_timing"]), (21, 12, 9))
         self.assertEqual(out["tier"], "A")
         self.assertIn("Revenue Operations Manager", out["angle_suggere"])
 

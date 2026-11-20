@@ -1,0 +1,56 @@
+[
+  {
+    "entreprise": "CrowdRiff",
+    "domaine": "crowdriff.com",
+    "titre": "Principal, Lifecyle Marketing",
+    "ats": "lever:crowdriff",
+    "posting_id": "0259d292-b2ca-467b-af60-ffa4ae32fbc6",
+    "attendu": "oui",
+    "pourquoi": "IA dans les workflows lifecycle/GTM"
+  },
+  {
+    "entreprise": "Jetson",
+    "domaine": "jetsonhome.com",
+    "titre": "Product Marketing Specialist",
+    "ats": "greenhouse:jetsonhome",
+    "posting_id": "4258017009",
+    "attendu": "oui",
+    "pourquoi": "automatiser les workflows avec des outils IA"
+  },
+  {
+    "entreprise": "Creyos",
+    "domaine": "creyos.com",
+    "titre": "Director, Integrated Marketing",
+    "ats": "workable:creyos",
+    "posting_id": "5C2DAFE814",
+    "attendu": "non",
+    "pourquoi": "piège : IA seulement dans la mention recrutement"
+  },
+  {
+    "entreprise": "AssistIQ",
+    "domaine": "assistiq.ai",
+    "titre": "Clinical Sales Lead",
+    "ats": "workable:assistiq",
+    "posting_id": "B32943578C",
+    "attendu": "non",
+    "pourquoi": "piège : IA dans le produit, rien pour l'équipe"
+  },
+  {
+    "entreprise": "Flashfood",
+    "domaine": "flashfood.com",
+    "titre": "Director of Communications",
+    "ats": "greenhouse:flashfood",
+    "posting_id": "4382479009",
+    "attendu": "ambigu",
+    "pourquoi": "« Experience leveraging AI tools » dans les atouts"
+  },
+  {
+    "entreprise": "Cision Canada",
+    "domaine": "cision.ca",
+    "titre": "Sales Development Representative",
+    "ats": "greenhouse:cision",
+    "posting_id": "4697351101",
+    "attendu": "non",
+    "pourquoi": "aucune mention"
+  }
+]

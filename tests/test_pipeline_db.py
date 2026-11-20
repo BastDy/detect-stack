@@ -131,7 +131,9 @@ class TestPipelineHistory(unittest.TestCase):
 
     def test_two_runs(self):
         rows1, summary1 = self.run_on(DAY1)
-        self.assertEqual((rows1["acme.com"]["tier"], rows1["acme.com"]["score"]), ("A", "12"))
+        # Profil 7 + Timing 4 (3+ offres sales 2 + levée du 2026-09-01 : 71 j, demi-vie 180 j, 3 -> 2) = 11 -> B
+        self.assertEqual((rows1["acme.com"]["tier"], rows1["acme.com"]["score"]), ("B", "11"))
+        self.assertEqual((rows1["acme.com"]["score_profil"], rows1["acme.com"]["score_timing"]), ("7", "4"))
         self.assertEqual(rows1["coldco.ca"]["tier"], "C")
         self.assertEqual(self.query("SELECT type FROM events WHERE type LIKE 'tool_%' OR type LIKE 'posting_%'"), [])
         self.assertEqual(rows1["acme.com"]["signaux_recents"], "")  # levée du 2026-09-01 : hors fenêtre de 30 jours
@@ -145,11 +147,18 @@ class TestPipelineHistory(unittest.TestCase):
 
         events = self.query("SELECT day, domain, type, detail FROM events WHERE day = ? ORDER BY id", DAY2.isoformat())
         self.assertEqual(events, [("2026-11-11", "acme.com", "tool_added", "HubSpot"),
-                                  ("2026-11-11", "acme.com", "posting_opened", "RevOps Manager")])
+                                  ("2026-11-11", "acme.com", "posting_opened", "RevOps Manager"),
+                                  ("2026-11-11", "acme.com", "tier_up", "B → A")])
         acme = rows2["acme.com"]
-        self.assertEqual((acme["tier"], acme["score"]), ("A", "19"))  # 12 + HubSpot 2 + RevOps 5
+        # 11 + HubSpot 2 (Profil) + offre RevOps 5 + HubSpot installé aujourd'hui 3 (Timing, événement de l'historique)
+        self.assertEqual((acme["tier"], acme["score"], acme["score_timing"]), ("A", "21", "12"))
+        self.assertIn("HubSpot installé, il y a 0 j +3", acme["detail_score"])
+        self.assertTrue(acme["angle_suggere"].startswith("HubSpot installé récemment"))
+        self.assertEqual(self.query("SELECT profile, timing FROM scores WHERE domain = 'acme.com' ORDER BY run_id"),
+                         [(7, 4), (9, 12)])
         self.assertEqual(acme["signaux_recents"],
-                         "2026-11-11 HubSpot installé · 2026-11-11 offre RevOps ouverte : RevOps Manager")
+                         "2026-11-11 HubSpot installé · 2026-11-11 offre RevOps ouverte : RevOps Manager"
+                         " · 2026-11-11 monte B → A")
         self.assertEqual(acme["ats"], "greenhouse:acme (lien du site)")
 
         # Domaine non relu : sa ligne est reconstruite depuis la base, identique à celle du run 1.
@@ -158,7 +167,7 @@ class TestPipelineHistory(unittest.TestCase):
         self.assertEqual({k: rows2["coldco.ca"][k] for k in keys}, {k: rows1["coldco.ca"][k] for k in keys})
         self.assertEqual(rows2["coldco.ca"]["ats"], "lever:coldco (lien du site)")
 
-        self.assertIn("- Événements détectés : **2**", summary2)
+        self.assertIn("- Événements détectés : **3**", summary2)
         self.assertLess(summary2.index("## Ce qui a changé"), summary2.index("## Top 20"))
         self.assertIn("### Outils installés (1)", summary2)
         self.assertIn("- Acme (acme.com) : HubSpot", summary2)

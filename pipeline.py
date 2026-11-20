@@ -14,10 +14,12 @@
                  pouvant atteindre le tier B) : tier A/B chaque jour, sinon tous les 7 jours, échec le lendemain,
                  aucun board trouvé : 14 jours
   6. Score       grille ICP -> tier A / B / C + angle d'approche ; score enregistré dans l'historique
-  7. LinkedIn    page entreprise pour les tiers A et B : cache 90 jours
-  8. Sortie      data/output/prospects-AAAA-MM-JJ.csv (un 2e run le même jour
+  7. Offres lues (--offres) texte complet des offres sales / RevOps / direction des tiers A et B, lu par Claude
+                 (posting_signals.py) : CRM demandé, premier recrutement, process à construire… une fois par offre
+  8. LinkedIn    page entreprise pour les tiers A et B : cache 90 jours
+  9. Sortie      data/output/prospects-AAAA-MM-JJ.csv (un 2e run le même jour
                  donne -2, -3… : jamais d'écrasement) (colonne signaux_recents = changements des 30 derniers
-                 jours) + prospects-latest.csv + resume-AAAA-MM-JJ.md (section « Ce qui a changé »)
+                 jours, colonne signaux_offres = ce que disent les offres lues) + prospects-latest.csv + resume-AAAA-MM-JJ.md (section « Ce qui a changé »)
 
 Chaque lecture (site, board d'offres) est enregistrée dans data/history.db (voir SCHEMA.md) ; les changements
 entre deux lectures deviennent des événements (outil installé, offre ouverte, levée, changement de tier…).
@@ -37,6 +39,8 @@ from pathlib import Path
 import betakit_funding
 import db
 import find_linkedin
+import posting_signals
+import timing
 import yc_companies
 from common import (
     CACHE, INPUTS, OUTPUT, Cache, is_error, job_category, normalize, reset_throttle_stats, run_stage, throttle_stats,
@@ -51,7 +55,8 @@ SIGNALS_DAYS = 30   # fenêtre de la colonne signaux_recents
 SIGNALS_MAX = 3
 _BASE_FIELDS = OUTPUT_FIELDS[:2] + ["nouveau"] + OUTPUT_FIELDS[2:]
 _AFTER_ANGLE = _BASE_FIELDS.index("angle_suggere") + 1
-PIPELINE_FIELDS = _BASE_FIELDS[:_AFTER_ANGLE] + ["signaux_recents"] + _BASE_FIELDS[_AFTER_ANGLE:] + ["sources", "vu_depuis"]
+PIPELINE_FIELDS = (_BASE_FIELDS[:_AFTER_ANGLE] + ["signaux_recents", "signaux_offres"] + _BASE_FIELDS[_AFTER_ANGLE:]
+                   + ["sources", "vu_depuis"])
 LATEST = OUTPUT / "prospects-latest.csv"
 
 
@@ -296,6 +301,8 @@ def _event_text(event):
         "posting_closed": "offre fermée : {}", "posting_stale": "offre RevOps non pourvue : {}",
         "leadership_hire": "recrute à la direction : {}", "hiring_spike": "hausse des recrutements ({})",
         "funding": "levée de fonds ({})", "tier_up": "monte {}", "tier_down": "descend {}",
+        "posting_crm_mismatch": "CRM différent du site dans une offre ({})", "posting_first_hire": "premier recrutement : {}",
+        "posting_build": "process à construire : {}",
     }
     if kind == "funding" and detail == "levée":
         return "levée de fonds"
@@ -314,6 +321,8 @@ CHANGE_GROUPS = {
     "leadership_hire": "Recrutements à la direction", "hiring_spike": "Hausse des recrutements sales",
     "posting_stale": "Offres RevOps non pourvues", "posting_closed": "Offres fermées",
     "tier_up": "Montées de tier", "tier_down": "Baisses de tier",
+    "posting_crm_mismatch": "Offres qui demandent un autre CRM que celui du site",
+    "posting_first_hire": "Premiers recrutements", "posting_build": "Offres : process à construire",
 }
 
 
@@ -450,9 +459,12 @@ def write_summary(path, rows, sources, warnings, prev_file, elapsed, tracker_siz
         lines += changes_section(changes)
     top = [r for r in rows if r["tier"] in {"A", "B"}][:20]
     if top:
-        lines += ["## Top 20", "", "| Tier | Score | Nouveau | Entreprise | Domaine | Angle |", "|---|---|---|---|---|---|"]
+        lines += ["## Top 20", "", "Score = Profil (ce qu'est l'entreprise) + Timing (ce qui s'y passe maintenant).", "",
+                  "| Tier | Score | Profil | Timing | Nouveau | Entreprise | Domaine | Angle |",
+                  "|---|---|---|---|---|---|---|---|"]
         lines += [
-            f"| {r['tier']} | {r['score']} | {r.get('nouveau', '')} | {r['entreprise']} | {r['domaine']} | {r.get('angle_suggere', '')} |"
+            f"| {r['tier']} | {r['score']} | {r.get('score_profil', '')} | {r.get('score_timing', '')} | {r.get('nouveau', '')}"
+            f" | {r['entreprise']} | {r['domaine']} | {(r.get('angle_suggere') or '').replace(' | ', ' · ')} |"
             for r in top
         ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -471,6 +483,8 @@ def main(argv=None):
     parser.add_argument("--refresh", action="store_true", help="relit tous les sites et toutes les offres, même s'ils ne sont pas dus")
     parser.add_argument("--refresh-sources", action="store_true", help="re-télécharge BetaKit et YC même si déjà faits aujourd'hui")
     parser.add_argument("--limit", type=int, default=0, help="n'analyse que les N premières entreprises (test rapide)")
+    parser.add_argument("--offres", action="store_true",
+                        help="lit le texte des offres des tiers A et B avec Claude (posting_signals.py, payant)")
     parser.add_argument("--db", default=str(db.DB_PATH), help="base historique SQLite (défaut : data/history.db)")
     parser.add_argument("--workers", type=int, default=24)
     parser.add_argument("--timeout", type=float, default=10)
@@ -529,14 +543,31 @@ def run(args, conn, run_id, grid, today, started, warnings, stats):
     finally:
         scans = stores["detection"].done
         stats.update(sites_read=len(scans), errors=sum(is_error(d) for d in scans.values()))
+    boosted = timing.apply_timing(conn, rows, today, grid)
+    print(f"  Timing : {boosted} entreprises avec des événements récents dans l'historique", flush=True)
     for r in rows:
         if r["tier"] in TIER_ORDER:
             db.record_score(conn, r["domaine"], run_id, today, r)
 
+    if args.offres:
+        print("\n== Offres lues par Claude ==", flush=True)
+        try:
+            read = posting_signals.analyze_pending(conn, today, run_id=run_id, workers=min(args.workers, 4))
+        except posting_signals.FatalAPIError as exc:
+            warnings.append(f"Lecture des offres arrêtée : {exc}"[:300])
+        else:
+            spent = posting_signals.cost(posting_signals.MODEL, read["input_tokens"], read["output_tokens"])
+            print(f"  {read['read']} offres lues · {read['errors']} en échec · {read['events']} événements"
+                  f" · ≈ {spent:.2f} $", flush=True)
+            if read["errors"]:
+                warnings.append(f"Offres non lues par Claude : {read['errors']} (retentées demain)")
+
     sources_by_domain = {r["domain"]: r["sources"] for r in records}
+    posting_text = posting_signals.signals_by_domain(conn)
     for r in rows:
         r["sources"] = sources_by_domain.get(r["domaine"], "")
         r["signaux_recents"] = recent_signals(conn, r["domaine"], today)
+        r["signaux_offres"] = posting_text.get(r["domaine"], "")
     changes = db.run_events(conn, run_id, since_day=today - timedelta(days=SIGNALS_DAYS))
 
     if not args.no_linkedin:

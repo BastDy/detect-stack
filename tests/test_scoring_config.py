@@ -40,9 +40,9 @@ class TestScoringConfig(unittest.TestCase):
         grid = grid_from({})
         self.assertEqual(grid, sp.DEFAULT_SCORING)
         out = sp.score(*FULL, TODAY, grid)
-        self.assertEqual((out["score"], out["tier"]), (22, "A"))
+        self.assertEqual((out["score"], out["tier"]), (21, "A"))
         self.assertIn("20-200 salariés +2", out["detail_score"])
-        self.assertIn("Levée < 12 mois +3", out["detail_score"])
+        self.assertIn("Levée il y a 163 j +2", out["detail_score"])
         self.assertIn("3+ offres sales/marketing +2", out["detail_score"])
 
     def test_partial_override_keeps_other_defaults(self):
@@ -69,7 +69,9 @@ class TestScoringConfig(unittest.TestCase):
         r = rec(employees="300", last_raised="2026-08-01")
         out = sp.score(r, {}, {"titles": ["Account Executive", "SDR"]}, TODAY, grid)
         self.assertIn("50-500 salariés +2", out["detail_score"])
-        self.assertIn("Levée < 180 jours +3", out["detail_score"])
+        self.assertIn("Levée il y a 102 j +2", out["detail_score"])
+        # Hors de la fenêtre de 180 jours : plus comptée du tout.
+        self.assertNotIn("Levée", sp.score(rec(last_raised="2026-04-01"), {}, {}, TODAY, grid)["detail_score"])
         self.assertIn("2+ offres sales/marketing +2", out["detail_score"])
         # 30 salariés : hors de la nouvelle fourchette
         self.assertNotIn("salariés", sp.score(rec(employees="30"), {}, {}, TODAY, grid)["detail_score"])

@@ -29,7 +29,8 @@ Une entreprise est identifiée partout par son **domaine** (`acme.com`, sans `ww
 | `stack` | État **actuel consolidé** des outils de chaque site, une ligne par (domaine, outil). Les outils incluent `HubSpot` (verdict Oui/Probable), chaque outil détecté (`Pipedrive`, `Calendly`, `Google Tag Manager`…) et `HubSpot portal <id>` pour chaque portal HubSpot. `status` = `present` ou `gone` ; `gone_since` = jour où l'outil a été déclaré disparu ; `absent_count` = nombre de lectures réussies consécutives où il manquait ; `checked_on` = dernier jour où la ligne a été évaluée. |
 | `job_reads` | Chaque relevé d'un board d'offres (`ats` = `greenhouse:acme`, `lever:acme`… ; vide = recherche sans board : `ok` = 1 aucun board trouvé, `ok` = 0 recherche plantée). `ok` = 0 si la lecture a échoué (ex. lien vers le board sur le site mais API en panne) ; `postings` = nombre d'offres lues ; `sales_open` = offres sales ouvertes après ce relevé. |
 | `job_postings` | Chaque offre d'emploi vue, une ligne par (domaine, ats, posting_id). `category` = `revops` (RevOps, Sales/Marketing Ops, CRM), `leadership` (VP / Head / Director sales-marketing-revenue, CRO, CMO), `sales` (AE, SDR, marketing, customer success) ou `other`. `published_at` = date de publication donnée par l'ATS (souvent vide) ; `first_seen` / `last_seen` = premier et dernier relevé où l'offre était présente ; `closed_on` = jour où elle a été déclarée fermée (NULL = encore ouverte). |
-| `scores` | Score de chaque entreprise à chaque run : `tier` (`A`, `B`, `C` ou `Exclu : …`), `score` (points, NULL si exclue), `detail` (points gagnés), `angle` (angle d'approche suggéré). |
+| `scores` | Score de chaque entreprise à chaque run : `tier` (`A`, `B`, `C` ou `Exclu : …`), `score` (points, NULL si exclue) = `profile` (ce qu'est l'entreprise) + `timing` (ce qui s'y passe maintenant, signaux datés pondérés par une demi-vie, voir `timing.py`) ; `profile` / `timing` sont NULL pour les runs d'avant leur ajout ; `detail` (points gagnés, avec l'âge des signaux datés), `angle` (angle d'approche suggéré). |
+| `posting_analyses` | Lecture d'une offre par Claude (`posting_signals.py`), une ligne par (domaine, ats, posting_id, `prompt_version`). `ok` = 1 si l'analyse a réussi ; `data` = JSON de l'analyse (`crm`, `outils`, `premier_recrutement`, `a_construire`, `equipe_en_croissance`, `taille_equipe`, `rattachement`, `marches`, `problemes`, `preuves` = citations exactes, `resume`, `tronque`) ; `error` = message si `ok` = 0 (retenté le lendemain) ; `input_tokens` / `output_tokens` = consommation de l'appel. |
 | `events` | Changements détectés, une ligne par événement : `day`, `domain`, `type`, `detail` (texte lisible : nom de l'outil, titre du poste, `C → A`…), `run_id`. `ref` = clé technique de dédoublonnage. |
 
 ### Types d'événements
@@ -45,6 +46,9 @@ Une entreprise est identifiée partout par son **domaine** (`acme.com`, sans `ww
 | `leadership_hire` | Recrutement d'un poste de direction commerciale / marketing / revenu. Émis une fois par offre. |
 | `hiring_spike` | Le nombre d'offres sales ouvertes augmente d'au moins 3 depuis le relevé précédent (`detail` = `6 → 9`). |
 | `funding` | Nouvelle levée de fonds (`day` = date d'annonce). |
+| `posting_crm_mismatch` | Une offre demande un CRM absent du site alors que le site en montre un autre (migration ou double CRM possible). `detail` = `titre : demande Salesforce, site : HubSpot`. Émis une fois par offre. |
+| `posting_first_hire` | Premier recrutement de la fonction (founding AE, first marketing hire…), d'après le texte de l'offre. Émis une fois par offre. |
+| `posting_build` | L'offre demande de construire process, playbook, rapports ou outillage. Émis une fois par offre. |
 | `tier_up` / `tier_down` | Le tier change entre deux runs (`detail` = `C → A`). Les exclusions sont ignorées. |
 
 ## Vues prêtes à l'emploi

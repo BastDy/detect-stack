@@ -109,6 +109,21 @@ ORDER BY e.day DESC, e.id DESC;
 """
 # Migrations futures : {version cible: script SQL}, appliquées dans l'ordre par connect().
 MIGRATIONS = {}
+# Tables ajoutées après la v1, créées si absentes à chaque connexion (sans changer user_version).
+# posting_analyses : lecture d'une offre par Claude (posting_signals.py), une ligne par offre et version de prompt.
+# account_qualifications : verdict de qualify_agent.py, une ligne par compte, jour et version de prompt.
+EXTRA_TABLES = """
+CREATE TABLE IF NOT EXISTS posting_analyses (
+    domain TEXT NOT NULL, ats TEXT NOT NULL, posting_id TEXT NOT NULL, prompt_version TEXT NOT NULL,
+    analyzed_on TEXT NOT NULL, model TEXT, ok INTEGER NOT NULL, data TEXT, error TEXT,
+    input_tokens INTEGER, output_tokens INTEGER, PRIMARY KEY (domain, ats, posting_id, prompt_version)
+);
+CREATE TABLE IF NOT EXISTS account_qualifications (
+    domain TEXT NOT NULL, day TEXT NOT NULL, prompt_version TEXT NOT NULL, model TEXT, ok INTEGER NOT NULL,
+    verdict TEXT, searched INTEGER, data TEXT, error TEXT, input_tokens INTEGER, output_tokens INTEGER,
+    web_searches INTEGER, PRIMARY KEY (domain, day, prompt_version)
+);
+"""
 
 
 # ---------- Connexion ----------
@@ -132,6 +147,11 @@ def connect(path=DB_PATH):
     # Colonne ajoutée après la v1 : bases existantes mises à niveau sans changer user_version.
     if "throttled" not in {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}:
         conn.execute("ALTER TABLE runs ADD COLUMN throttled INTEGER")
+    score_cols = {r["name"] for r in conn.execute("PRAGMA table_info(scores)")}
+    for col in ("profile", "timing"):  # parties Profil et Timing du score (NULL pour les runs d'avant)
+        if col not in score_cols:
+            conn.execute(f"ALTER TABLE scores ADD COLUMN {col} INTEGER")
+    conn.executescript(EXTRA_TABLES)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
     return conn
@@ -415,12 +435,18 @@ def record_score(conn, domain, run_id, day, row):
     with conn:
         prev = conn.execute("""SELECT tier FROM scores WHERE domain = ? AND run_id != ? AND tier IN ('A', 'B', 'C')
                                ORDER BY day DESC, run_id DESC LIMIT 1""", (domain, run_id)).fetchone()
-        conn.execute("INSERT OR REPLACE INTO scores VALUES (?, ?, ?, ?, ?, ?, ?)",
+        conn.execute("""INSERT OR REPLACE INTO scores (domain, run_id, day, tier, score, detail, angle, profile, timing)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                      (domain, run_id, day, tier, score if score not in ("", None) else None,
-                      row.get("detail_score") or None, row.get("angle_suggere") or None))
+                      row.get("detail_score") or None, row.get("angle_suggere") or None,
+                      _int_or_none(row.get("score_profil")), _int_or_none(row.get("score_timing"))))
         if prev and tier in TIERS and tier != prev["tier"]:
             kind = "tier_up" if TIERS[tier] < TIERS[prev["tier"]] else "tier_down"
             _event(conn, day, domain, kind, f"{prev['tier']} → {tier}", run_id, ref=f"{prev['tier']}>{tier}")
+
+
+def _int_or_none(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 # ---------- Lecture ----------

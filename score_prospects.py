@@ -116,16 +116,29 @@ AMBIGUOUS_CITIES = {
 }
 # Grille de score par défaut. config.json peut en surcharger une partie sous la clé "scoring",
 # avec la même structure (ex. {"scoring": {"points": {"funding": 4}, "tiers": {"A": 13}}}).
+#
+# Le score a deux parties :
+#   - Profil : ce que l'entreprise est (SaaS, taille, HubSpot, région, autre CRM). Change rarement.
+#   - Timing : ce qui se passe maintenant (offres ouvertes, levée, événements de l'historique). Un signal daté perd
+#     la moitié de sa valeur tous les `decay[...]` jours (demi-vie), arrondi à l'entier ; à 0 il disparaît.
+# Les points des événements (leadership_hire…) ne sont utilisés que par le pipeline (timing.py), qui lit data/history.db.
 DEFAULT_SCORING = {
-    "points": {"saas": 3, "size": 2, "hubspot": 2, "ontario": 2, "canada": 1,
-               "revops_job": 5, "funding": 3, "sales_jobs": 2, "other_crm": 3},
+    "points": {"saas": 3, "size": 2, "hubspot": 2, "ontario": 2, "canada": 1, "other_crm": 3,   # Profil
+               "revops_job": 5, "funding": 3, "sales_jobs": 2,                                 # Timing (état actuel)
+               "leadership_hire": 3, "crm_installed": 3, "second_portal": 2, "hiring_spike": 2,  # Timing (événements)
+               "posting_stale": 2, "posting_crm_mismatch": 3, "posting_first_hire": 2, "posting_build": 2},
     "size": {"min": 20, "max": 200, "exclude_below": 10},  # fourchette ICP ; exclusion sous exclude_below salariés
-    "signals": {"sales_jobs_min": 3, "funding_days": 365},
-    "tiers": {"A": 12, "B": 8},  # score minimum de chaque tier, C en dessous
+    "signals": {"sales_jobs_min": 3, "funding_days": 365,
+                "event_days": 180},  # âge maximal d'un événement pris en compte dans le Timing
+    "decay": {"funding": 180, "leadership_hire": 60, "crm_installed": 45, "second_portal": 90, "hiring_spike": 30,
+              "posting_stale": 90, "posting_crm_mismatch": 90, "posting_first_hire": 90, "posting_build": 90},
+    # score minimum de chaque tier, C en dessous ; A exige aussi au moins A_timing_min points de Timing
+    # (sinon B) : un bon profil sans rien qui bouge n'est pas prioritaire.
+    "tiers": {"A": 12, "B": 8, "A_timing_min": 1},
 }
 PROVINCES = {name.lower(): name for name in PROVINCE_CODES.values()} | {code.lower(): name for code, name in PROVINCE_CODES.items()}
 OUTPUT_FIELDS = [
-    "tier", "score", "entreprise", "domaine", "detail_score", "angle_suggere",
+    "tier", "score", "score_profil", "score_timing", "entreprise", "domaine", "detail_score", "angle_suggere",
     "offres_revops", "nb_offres_sales_marketing", "ats", "employes", "secteur",
     "ville", "province", "pays", "hubspot_site", "hubspot_apollo", "autres_outils",
     "indices_saas", "derniere_levee", "linkedin", "erreur_site",
@@ -339,14 +352,28 @@ def parse_date(value):
     return None
 
 
+def decayed(points, age_days, half_life):
+    """Points d'un signal vieux de age_days : divisés par 2 toutes les half_life jours, arrondis (0,5 -> 1)."""
+    if age_days < 0:
+        age_days = 0
+    return int(points * 0.5 ** (age_days / half_life) + 0.5) if half_life > 0 else points
+
+
+def tier_of(total, timing, grid=None):
+    tiers = (grid or DEFAULT_SCORING)["tiers"]
+    if total >= tiers["A"] and timing >= tiers.get("A_timing_min", 0):
+        return "A"
+    return "B" if total >= tiers["B"] else "C"
+
+
 def score(rec, det, jobs, today, grid=None):
     grid = grid or DEFAULT_SCORING
-    pts, size, signals, tiers = grid["points"], grid["size"], grid["signals"], grid["tiers"]
-    points, detail = 0, []
+    pts, size, signals = grid["points"], grid["size"], grid["signals"]
+    parts = {"profil": 0, "timing": 0}
+    detail = []
 
-    def add(n, label):
-        nonlocal points
-        points += n
+    def add(n, label, part="profil"):
+        parts[part] += n
         detail.append(f"{label} +{n}")
 
     others = {t for t in (det.get("autres_outils") or "").split(", ") if t}
@@ -356,9 +383,10 @@ def score(rec, det, jobs, today, grid=None):
     revops_jobs = [t for t in titles if REVOPS_TITLE.search(t)]
     sales_jobs = [t for t in titles if SALES_TITLE.search(t) and not REVOPS_TITLE.search(t)]
     raised = parse_date(rec["last_raised"])
-    recent_raise = bool(raised) and (today - raised).days <= signals["funding_days"]
+    raise_age = (today - raised).days if raised else None
+    recent_raise = raise_age is not None and raise_age <= signals["funding_days"]
+    funding_pts = decayed(pts["funding"], raise_age, grid["decay"]["funding"]) if recent_raise else 0
     many_sales_jobs = len(sales_jobs) >= signals["sales_jobs_min"]
-    window = "12 mois" if signals["funding_days"] == 365 else f"{signals['funding_days']} jours"
 
     if SAAS_INDUSTRY.search(rec["industry"]) or "saas" in rec["keywords"].lower() or len(saas_hints) >= 2:
         add(pts["saas"], "SaaS/tech")
@@ -371,14 +399,14 @@ def score(rec, det, jobs, today, grid=None):
         add(pts["ontario"], "Ontario")
     elif rec["country"].lower() == "canada" or (not rec["country"] and rec["domain"].endswith(".ca")):
         add(pts["canada"], "Canada")
-    if revops_jobs:
-        add(pts["revops_job"], "Offre RevOps/Ops ouverte")
-    if recent_raise:
-        add(pts["funding"], f"Levée < {window}")
-    if many_sales_jobs:
-        add(pts["sales_jobs"], f"{signals['sales_jobs_min']}+ offres sales/marketing")
     if hubspot and others & COMPETITOR_CRM:
         add(pts["other_crm"], "Autre CRM visible")
+    if revops_jobs:
+        add(pts["revops_job"], "Offre RevOps/Ops ouverte", "timing")
+    if funding_pts:
+        add(funding_pts, f"Levée il y a {max(raise_age, 0)} j", "timing")
+    if many_sales_jobs:
+        add(pts["sales_jobs"], f"{signals['sales_jobs_min']}+ offres sales/marketing", "timing")
 
     angles = []
     if revops_jobs:
@@ -399,10 +427,12 @@ def score(rec, det, jobs, today, grid=None):
     if recent_raise:
         angles.append("Levée récente : structurer le RevOps pour la croissance")
 
-    tier = "A" if points >= tiers["A"] else "B" if points >= tiers["B"] else "C"
+    total = parts["profil"] + parts["timing"]
     return {
-        "tier": tier,
-        "score": points,
+        "tier": tier_of(total, parts["timing"], grid),
+        "score": total,
+        "score_profil": parts["profil"],
+        "score_timing": parts["timing"],
         "detail_score": "; ".join(detail),
         "angle_suggere": " | ".join(angles[:2]),
         "offres_revops": " ; ".join(revops_jobs[:3]),
